@@ -86,6 +86,8 @@ playback_pause_start = None
 playback_pause_accum = 0.0
 current_audio_duration = 0.0
 current_progress = 0.0
+pyttsx3_engine = None
+pyttsx3_lock = threading.Lock()
 
 def cleanup_audio_files():
     """Remove any existing audio files from previous runs."""
@@ -125,6 +127,14 @@ def create_lips_icon():
     draw.line([16, 32, 48, 32], fill='#FF1493', width=2)
     
     return image
+
+def get_pyttsx3_engine():
+    """Return a shared pyttsx3 engine instance to avoid GC issues."""
+    global pyttsx3_engine
+    if pyttsx3_engine is None:
+        import pyttsx3
+        pyttsx3_engine = pyttsx3.init()
+    return pyttsx3_engine
 
 def wait_for_audio_file(file_path, timeout=2.0):
     """Wait for audio file to exist and be non-empty."""
@@ -287,6 +297,9 @@ def read_selected_text():
             pass
         time.sleep(0.1)  # Give clipboard time to update
         current_text = pyperclip.paste()
+        if debug_mode:
+            print(f"🐛 [DEBUG] Raw clipboard content:")
+            print(f"🐛 [DEBUG] {repr(current_text)}\n")
         if current_text.strip():
             if debug_mode:
                 print(f"\n🐛 [DEBUG] Reading selected text:")
@@ -310,7 +323,7 @@ def read_selected_text():
                 thread = threading.Thread(target=gtts_worker, daemon=True)
                 thread.start()
                 try:
-                    thread.join(timeout=10)
+                    thread.join(timeout=20)
                     if thread.is_alive():
                         result_queue.put(Exception("gTTS generation timed out. Check your internet connection."))
                         # Optionally kill thread (not possible in Python, but dialog will close)
@@ -328,10 +341,14 @@ def read_selected_text():
 
             def build_mp3_pyttsx3():
                 try:
-                    import pyttsx3
-                    engine = pyttsx3.init()
-                    engine.save_to_file(current_text, audio_file_wav)
-                    engine.runAndWait()
+                    engine = get_pyttsx3_engine()
+                    with pyttsx3_lock:
+                        try:
+                            engine.stop()
+                        except Exception:
+                            pass
+                        engine.save_to_file(current_text, audio_file_wav)
+                        engine.runAndWait()
                     if not cancel_flag['cancel']:
                         threading.Thread(target=play_audio, daemon=True).start()
                 except Exception as e:
