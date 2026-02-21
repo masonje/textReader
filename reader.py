@@ -39,6 +39,7 @@ import time
 import pygame
 import os
 import threading
+import wave
 from pystray import Icon
 from PIL import Image, ImageDraw
 from pynput import keyboard
@@ -80,6 +81,11 @@ shift_pressed = False
 control_window = None
 playback_speed = settings.get("playback_speed", 1.0)
 tts_engine = settings.get("tts_engine", "gTTS")
+playback_start_time = None
+playback_pause_start = None
+playback_pause_accum = 0.0
+current_audio_duration = 0.0
+current_progress = 0.0
 
 def cleanup_audio_files():
     """Remove any existing audio files from previous runs."""
@@ -120,11 +126,58 @@ def create_lips_icon():
     
     return image
 
+def wait_for_audio_file(file_path, timeout=2.0):
+    """Wait for audio file to exist and be non-empty."""
+    start = time.monotonic()
+    while time.monotonic() - start < timeout:
+        try:
+            if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                return True
+        except Exception:
+            pass
+        time.sleep(0.05)
+    return False
+
+def get_audio_duration(file_path):
+    """Return audio duration in seconds, or 0 on failure."""
+    try:
+        if file_path.endswith(".wav"):
+            with wave.open(file_path, 'rb') as wf:
+                frames = wf.getnframes()
+                rate = wf.getframerate()
+                if rate:
+                    return frames / float(rate)
+                return 0.0
+        import subprocess
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                file_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+            check=False,
+        )
+        return float(result.stdout.strip()) if result.stdout.strip() else 0.0
+    except Exception:
+        return 0.0
+
 def play_audio():
     """Play the generated audio file at the selected speed"""
+    global playback_start_time, playback_pause_start, playback_pause_accum, current_audio_duration
     try:
         # Choose file based on engine
         file_to_play = audio_file_mp3 if tts_engine == "gTTS" else audio_file_wav
+        if not wait_for_audio_file(file_to_play):
+            print("⚠️ Audio file not ready for playback")
+            return
         pygame.mixer.music.load(file_to_play)
         # Adjust speed for MP3 only
         if playback_speed != 1.0 and tts_engine == "gTTS":
@@ -135,6 +188,11 @@ def play_audio():
                 "-filter:a", f"atempo={playback_speed}", temp_speed_file
             ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             pygame.mixer.music.load(temp_speed_file)
+            file_to_play = temp_speed_file
+        playback_start_time = time.monotonic()
+        playback_pause_start = None
+        playback_pause_accum = 0.0
+        current_audio_duration = get_audio_duration(file_to_play)
         pygame.mixer.music.play()
         while pygame.mixer.music.get_busy() and is_running and not is_paused:
             time.sleep(0.1)
@@ -160,27 +218,39 @@ def on_play():
 
 def on_pause():
     """Pause/resume current playback"""
-    global is_paused
+    global is_paused, playback_pause_start, playback_pause_accum
     if pygame.mixer.music.get_busy():
         if is_paused:
             pygame.mixer.music.unpause()
             is_paused = False
+            if playback_pause_start is not None:
+                playback_pause_accum += time.monotonic() - playback_pause_start
+                playback_pause_start = None
             print("▶ Resumed")
         else:
             is_paused = True
+            playback_pause_start = time.monotonic()
             pygame.mixer.music.pause()
             print("⏸ Paused")
     elif is_paused:
         pygame.mixer.music.unpause()
         is_paused = False
+        if playback_pause_start is not None:
+            playback_pause_accum += time.monotonic() - playback_pause_start
+            playback_pause_start = None
         print("▶ Resumed")
     else:
         print("⚠️ Nothing playing to pause")
 
 def on_stop():
     """Stop and reset playback"""
-    global is_paused
+    global is_paused, playback_start_time, playback_pause_start, playback_pause_accum, current_audio_duration, current_progress
     is_paused = False
+    playback_start_time = None
+    playback_pause_start = None
+    playback_pause_accum = 0.0
+    current_audio_duration = 0.0
+    current_progress = 0.0
     pygame.mixer.music.stop()
     print("⏹ Stopped")
 
@@ -196,7 +266,25 @@ def read_selected_text():
     """Read the currently selected text from clipboard"""
     try:
         # Copy selected text to clipboard first (requires xclip on Linux or xsel)
-        os.system('xclip -selection primary -o | xclip -selection clipboard')
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["xclip", "-selection", "primary", "-o"],
+                capture_output=True,
+                text=True,
+                timeout=0.5,
+                check=False,
+            )
+            if result.stdout:
+                subprocess.run(
+                    ["xclip", "-selection", "clipboard"],
+                    input=result.stdout,
+                    text=True,
+                    timeout=0.5,
+                    check=False,
+                )
+        except Exception:
+            pass
         time.sleep(0.1)  # Give clipboard time to update
         current_text = pyperclip.paste()
         if current_text.strip():
@@ -267,6 +355,9 @@ def read_selected_text():
             dialog.grab_set()
             label = ttk.Label(dialog, text="Building MP3 for playback...", font=("Arial", 10))
             label.pack(pady=10)
+            progress = ttk.Progressbar(dialog, orient=tk.HORIZONTAL, length=200, mode="indeterminate")
+            progress.pack(pady=(0, 5))
+            progress.start(10)
             def on_cancel():
                 cancel_flag['cancel'] = True
                 dialog.destroy()
@@ -383,6 +474,12 @@ def create_control_window():
     speed_slider.pack(side=tk.LEFT, padx=2)
     slider_value_label = ttk.Label(speed_frame, text=f"{playback_speed:.2f}x", font=("Arial", 9))
     slider_value_label.pack(side=tk.LEFT, padx=2)
+    # Progress bar
+    progress_label = ttk.Label(window, text="Progress:", font=("Arial", 9))
+    progress_label.pack(pady=(5, 2))
+    progress_var = tk.DoubleVar(value=0.0)
+    progress_bar = ttk.Progressbar(window, orient=tk.HORIZONTAL, length=200, mode="determinate", maximum=100, variable=progress_var)
+    progress_bar.pack(pady=(0, 5))
     # Button frame
     button_frame = ttk.Frame(window)
     button_frame.pack(pady=10)
@@ -398,15 +495,25 @@ def create_control_window():
                      font=("Arial", 8), justify=tk.LEFT)
     info.pack(pady=10)
     def update_status():
-        if pygame.mixer.music.get_busy():
+        global current_progress
+        if pygame.mixer.music.get_busy() or is_paused:
             if is_paused:
                 status_label.config(text="Status: Paused")
             else:
                 status_label.config(text="Status: Playing")
             speed_slider.state(["disabled"])
+            if playback_start_time and current_audio_duration > 0:
+                if not is_paused:
+                    now = time.monotonic()
+                    elapsed = now - playback_start_time - playback_pause_accum
+                    current_progress = max(0.0, min(100.0, (elapsed / current_audio_duration) * 100.0))
+                progress_var.set(current_progress)
+            else:
+                progress_var.set(0.0)
         else:
             status_label.config(text="Status: Stopped")
             speed_slider.state(["!disabled"])
+            progress_var.set(0.0)
         debug_text = "Debug: ON" if debug_mode else "Debug: OFF"
         debug_color = "green" if debug_mode else "gray"
         debug_label.config(text=debug_text, foreground=debug_color)
