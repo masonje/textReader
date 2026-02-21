@@ -3,12 +3,12 @@
     "configurations": [
         {
             "name": "Python: Clipboard Reader",
-            "type": "python",
+            "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/reader.py",
             "console": "integratedTerminal",
             "justMyCode": true,
-            "python": "${workspaceFolder}/myenv/bin/python",
+            "python": "${workspaceFolder}/.venv/bin/python",
             "cwd": "${workspaceFolder}"
         }
     ]

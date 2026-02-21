@@ -1,5 +1,6 @@
 # Latest versions for 2026
 # Core dependencies
+gTTS==2.5.4
 pyperclip==1.11.0
 gTTS==2.5.4
 pygame==2.6.1
@@ -7,6 +8,7 @@ pystray==0.19.5
 pillow==12.1.0
 pynput==1.8.1
 pyttsx3==2.99
+numpy==1.26.4
 PyAudio==0.2.14
 SpeechRecognition==3.14.5
 
@@ -22,6 +24,6 @@ idna==3.11
 urllib3==2.6.3
 typing_extensions==4.15.0
 evdev==1.9.2
-audioop-lts==0.2.2
+
 standard-aifc==3.13.0
 standard-chunk==3.13.0

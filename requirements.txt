@@ -1,0 +1,9 @@
+
+
+# Required dependencies for reader.py
+pyperclip==1.11.0
+gTTS==2.5.4
+pygame==2.6.1
+pystray==0.19.5
+Pillow==12.1.0
+pynput==1.8.1
