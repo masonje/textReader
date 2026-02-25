@@ -26,6 +26,14 @@ check_dep('numpy')
 if shutil.which('ffmpeg') is None:
     missing.append('ffmpeg (system package)')
 
+# Check espeak-ng
+if shutil.which('espeak-ng') is None:
+    missing.append('espeak-ng (system package)')
+
+# Check festival
+if shutil.which('festival') is None:
+    missing.append('festival (system package)')
+
 if missing:
     print("Missing dependencies:")
     for dep in missing:
@@ -88,6 +96,7 @@ current_audio_duration = 0.0
 current_progress = 0.0
 pyttsx3_engine = None
 pyttsx3_lock = threading.Lock()
+taskbar_icon_photo = None
 
 def cleanup_audio_files():
     """Remove any existing audio files from previous runs."""
@@ -107,7 +116,7 @@ def has_audio_file():
     try:
         if tts_engine == "gTTS":
             return os.path.exists(audio_file_mp3)
-        if tts_engine == "pyttsx3":
+        if tts_engine in ("pyttsx3", "eSpeak-NG", "Festival"):
             return os.path.exists(audio_file_wav)
     except Exception:
         pass
@@ -127,6 +136,16 @@ def create_lips_icon():
     draw.line([16, 32, 48, 32], fill='#FF1493', width=2)
     
     return image
+
+def ensure_lips_icon_file():
+    """Create lips icon file and return its path."""
+    icon_path = SETTINGS_DIR / "lips_icon.png"
+    try:
+        img = create_lips_icon()
+        img.save(icon_path)
+    except Exception:
+        pass
+    return icon_path
 
 def get_pyttsx3_engine():
     """Return a shared pyttsx3 engine instance to avoid GC issues."""
@@ -185,7 +204,7 @@ def play_audio():
     try:
         # Choose file based on engine
         file_to_play = audio_file_mp3 if tts_engine == "gTTS" else audio_file_wav
-        if not wait_for_audio_file(file_to_play):
+        if not wait_for_audio_file(file_to_play, 20):
             print("⚠️ Audio file not ready for playback")
             return
         pygame.mixer.music.load(file_to_play)
@@ -356,11 +375,47 @@ def read_selected_text():
                 finally:
                     dialog.destroy()
 
+            def build_mp3_espeak():
+                try:
+                    import subprocess
+                    subprocess.run(
+                        ["espeak-ng", "-w", audio_file_wav, current_text],
+                        check=False,
+                        timeout=20,
+                    )
+                    if not cancel_flag['cancel']:
+                        threading.Thread(target=play_audio, daemon=True).start()
+                except Exception as e:
+                    print(f"Error: {e}")
+                finally:
+                    dialog.destroy()
+
+            def build_mp3_festival():
+                try:
+                    import subprocess
+                    subprocess.run(
+                        ["text2wave", "-o", audio_file_wav],
+                        input=current_text,
+                        text=True,
+                        check=False,
+                        timeout=20,
+                    )
+                    if not cancel_flag['cancel']:
+                        threading.Thread(target=play_audio, daemon=True).start()
+                except Exception as e:
+                    print(f"Error: {e}")
+                finally:
+                    dialog.destroy()
+
             def build_mp3():
                 if tts_engine == "gTTS":
                     build_mp3_gtts()
                 elif tts_engine == "pyttsx3":
                     build_mp3_pyttsx3()
+                elif tts_engine == "eSpeak-NG":
+                    build_mp3_espeak()
+                elif tts_engine == "Festival":
+                    build_mp3_festival()
                 else:
                     print("Error: Unknown TTS engine")
                     dialog.destroy()
@@ -426,7 +481,7 @@ def create_control_window():
     engine_label = ttk.Label(engine_frame, text="TTS Engine:", font=("Arial", 9))
     engine_label.pack(side=tk.LEFT, padx=2)
     engine_var = tk.StringVar(value=tts_engine)
-    engine_dropdown = ttk.Combobox(engine_frame, textvariable=engine_var, values=["gTTS", "pyttsx3"], state="readonly", width=12)
+    engine_dropdown = ttk.Combobox(engine_frame, textvariable=engine_var, values=["gTTS", "pyttsx3", "eSpeak-NG", "Festival"], state="readonly", width=12)
     engine_dropdown.pack(side=tk.LEFT, padx=2)
     def on_engine_select(event=None):
         global tts_engine
@@ -461,13 +516,13 @@ def create_control_window():
         debug_mode = (debug_var.get() == "ON")
         save_settings()
     debug_dropdown.bind("<<ComboboxSelected>>", on_debug_select)
-    # Set window icon
+    # Set window/taskbar icon
     try:
-        img = create_lips_icon()
-        icon_path = SETTINGS_DIR / "lips_icon.png"
-        img.save(icon_path)
+        icon_path = ensure_lips_icon_file()
         photo = tk.PhotoImage(file=icon_path)
-        window.iconphoto(False, photo)
+        global taskbar_icon_photo
+        taskbar_icon_photo = photo
+        window.iconphoto(False, taskbar_icon_photo)
     except:
         pass
     # Status label
@@ -606,8 +661,12 @@ def clipboard_monitor():
 
 def run_tray():
     """Run the system tray icon (display only, no menu)"""
-    image = create_lips_icon()
-    icon = Icon("Clipboard Reader", image, title="Clipboard Reader")
+    icon_path = ensure_lips_icon_file()
+    try:
+        image = Image.open(icon_path).convert("RGBA")
+    except Exception:
+        image = create_lips_icon()
+    icon = Icon("clipboard_reader_tray", image, title="Clipboard Reader")
     print("System tray icon created.")
     icon.run(setup=lambda icon: None)
 
