@@ -13,8 +13,6 @@ def check_dep(mod, pip_name=None):
 
 # Check Python packages
 check_dep('pyperclip')
-check_dep('gtts', 'gTTS')
-check_dep('pyttsx3')
 check_dep('pygame')
 check_dep('pystray')
 check_dep('PIL', 'Pillow')
@@ -26,14 +24,6 @@ check_dep('numpy')
 if shutil.which('ffmpeg') is None:
     missing.append('ffmpeg (system package)')
 
-# Check espeak-ng
-if shutil.which('espeak-ng') is None:
-    missing.append('espeak-ng (system package)')
-
-# Check festival
-if shutil.which('festival') is None:
-    missing.append('festival (system package)')
-
 if missing:
     print("Missing dependencies:")
     for dep in missing:
@@ -42,7 +32,6 @@ if missing:
     sys.exit(1)
 
 import pyperclip
-from gtts import gTTS
 import time
 import pygame
 import os
@@ -53,6 +42,8 @@ from PIL import Image, ImageDraw
 from pynput import keyboard
 import tkinter as tk
 from tkinter import ttk
+from tkinter import messagebox
+from tts_engines import get_engine, list_engines
 
 # Initialize pygame mixer for audio playback
 pygame.mixer.init()
@@ -94,9 +85,35 @@ playback_pause_start = None
 playback_pause_accum = 0.0
 current_audio_duration = 0.0
 current_progress = 0.0
-pyttsx3_engine = None
-pyttsx3_lock = threading.Lock()
 taskbar_icon_photo = None
+engine_missing_deps = False
+tray_icon = None
+
+def get_output_path(engine_name):
+    """Return output path based on engine output format."""
+    engine = get_engine(engine_name)
+    if engine and engine.output_ext == "mp3":
+        return audio_file_mp3
+    return audio_file_wav
+
+def check_engine_dependencies(engine_name):
+    """Check dependencies for the selected engine and return missing list."""
+    if debug_mode:
+        print(f"🐛 [DEBUG] Checking dependencies for engine: {engine_name}")
+    engine = get_engine(engine_name)
+    if engine is None:
+        if debug_mode:
+            print(f"🐛 [DEBUG] Engine not found: {engine_name}")
+        return [f"Unknown TTS engine: {engine_name}"]
+    missing_deps = engine.check_dependencies()
+    if debug_mode:
+        if missing_deps:
+            print(f"🐛 [DEBUG] Missing deps for {engine_name}: {missing_deps}")
+        else:
+            print(f"🐛 [DEBUG] All deps satisfied for {engine_name}")
+    return missing_deps
+
+check_engine_dependencies(tts_engine)
 
 def cleanup_audio_files():
     """Remove any existing audio files from previous runs."""
@@ -114,10 +131,8 @@ def cleanup_audio_files():
 def has_audio_file():
     """Return True if there is an audio file available for playback."""
     try:
-        if tts_engine == "gTTS":
-            return os.path.exists(audio_file_mp3)
-        if tts_engine in ("pyttsx3", "eSpeak-NG", "Festival"):
-            return os.path.exists(audio_file_wav)
+        file_path = get_output_path(tts_engine)
+        return os.path.exists(file_path)
     except Exception:
         pass
     return False
@@ -146,14 +161,6 @@ def ensure_lips_icon_file():
     except Exception:
         pass
     return icon_path
-
-def get_pyttsx3_engine():
-    """Return a shared pyttsx3 engine instance to avoid GC issues."""
-    global pyttsx3_engine
-    if pyttsx3_engine is None:
-        import pyttsx3
-        pyttsx3_engine = pyttsx3.init()
-    return pyttsx3_engine
 
 def wait_for_audio_file(file_path, timeout=2.0):
     """Wait for audio file to exist and be non-empty."""
@@ -203,7 +210,7 @@ def play_audio():
     global playback_start_time, playback_pause_start, playback_pause_accum, current_audio_duration
     try:
         # Choose file based on engine
-        file_to_play = audio_file_mp3 if tts_engine == "gTTS" else audio_file_wav
+        file_to_play = get_output_path(tts_engine)
         if not wait_for_audio_file(file_to_play, 20):
             print("⚠️ Audio file not ready for playback")
             return
@@ -327,97 +334,26 @@ def read_selected_text():
 
             # Show modal dialog with cancel button
             cancel_flag = {'cancel': False}
-            def build_mp3_gtts():
-                import queue
-                import threading
-                result_queue = queue.Queue()
-                def gtts_worker():
-                    try:
-                        from gtts import gTTS
-                        tts = gTTS(text=current_text, lang='en', slow=False)
-                        tts.save(audio_file_mp3)
-                        result_queue.put(None)
-                    except Exception as e:
-                        result_queue.put(e)
-                thread = threading.Thread(target=gtts_worker, daemon=True)
-                thread.start()
+            def build_audio():
                 try:
-                    thread.join(timeout=20)
-                    if thread.is_alive():
-                        result_queue.put(Exception("gTTS generation timed out. Check your internet connection."))
-                        # Optionally kill thread (not possible in Python, but dialog will close)
-                    result = result_queue.get()
-                    if result is None and not cancel_flag['cancel']:
-                        threading.Thread(target=play_audio, daemon=True).start()
-                    elif isinstance(result, Exception):
-                        label.config(text=f"Error: {result}", foreground="red")
+                    engine = get_engine(tts_engine)
+                    if engine is None:
+                        label.config(text="Error: Unknown TTS engine", foreground="red")
                         time.sleep(2)
+                        return
+                    missing_deps = engine.check_dependencies()
+                    if missing_deps:
+                        label.config(text=f"Missing: {', '.join(missing_deps)}", foreground="red")
+                        time.sleep(2)
+                        return
+                    output_path = get_output_path(tts_engine)
+                    engine.synthesize(current_text, output_path)
+                    if not cancel_flag['cancel']:
+                        threading.Thread(target=play_audio, daemon=True).start()
                 except Exception as e:
                     label.config(text=f"Error: {e}", foreground="red")
                     time.sleep(2)
                 finally:
-                    dialog.destroy()
-
-            def build_mp3_pyttsx3():
-                try:
-                    engine = get_pyttsx3_engine()
-                    with pyttsx3_lock:
-                        try:
-                            engine.stop()
-                        except Exception:
-                            pass
-                        engine.save_to_file(current_text, audio_file_wav)
-                        engine.runAndWait()
-                    if not cancel_flag['cancel']:
-                        threading.Thread(target=play_audio, daemon=True).start()
-                except Exception as e:
-                    print(f"Error: {e}")
-                finally:
-                    dialog.destroy()
-
-            def build_mp3_espeak():
-                try:
-                    import subprocess
-                    subprocess.run(
-                        ["espeak-ng", "-w", audio_file_wav, current_text],
-                        check=False,
-                        timeout=20,
-                    )
-                    if not cancel_flag['cancel']:
-                        threading.Thread(target=play_audio, daemon=True).start()
-                except Exception as e:
-                    print(f"Error: {e}")
-                finally:
-                    dialog.destroy()
-
-            def build_mp3_festival():
-                try:
-                    import subprocess
-                    subprocess.run(
-                        ["text2wave", "-o", audio_file_wav],
-                        input=current_text,
-                        text=True,
-                        check=False,
-                        timeout=20,
-                    )
-                    if not cancel_flag['cancel']:
-                        threading.Thread(target=play_audio, daemon=True).start()
-                except Exception as e:
-                    print(f"Error: {e}")
-                finally:
-                    dialog.destroy()
-
-            def build_mp3():
-                if tts_engine == "gTTS":
-                    build_mp3_gtts()
-                elif tts_engine == "pyttsx3":
-                    build_mp3_pyttsx3()
-                elif tts_engine == "eSpeak-NG":
-                    build_mp3_espeak()
-                elif tts_engine == "Festival":
-                    build_mp3_festival()
-                else:
-                    print("Error: Unknown TTS engine")
                     dialog.destroy()
 
             dialog = tk.Toplevel(control_window)
@@ -435,7 +371,7 @@ def read_selected_text():
                 dialog.destroy()
             cancel_btn = ttk.Button(dialog, text="Cancel", command=on_cancel)
             cancel_btn.pack(pady=5)
-            threading.Thread(target=build_mp3, daemon=True).start()
+            threading.Thread(target=build_audio, daemon=True).start()
             dialog.wait_window()
         else:
             print("⚠️ No text to read")
@@ -481,10 +417,10 @@ def create_control_window():
     engine_label = ttk.Label(engine_frame, text="TTS Engine:", font=("Arial", 9))
     engine_label.pack(side=tk.LEFT, padx=2)
     engine_var = tk.StringVar(value=tts_engine)
-    engine_dropdown = ttk.Combobox(engine_frame, textvariable=engine_var, values=["gTTS", "pyttsx3", "eSpeak-NG", "Festival"], state="readonly", width=12)
+    engine_dropdown = ttk.Combobox(engine_frame, textvariable=engine_var, values=list_engines(), state="readonly", width=12)
     engine_dropdown.pack(side=tk.LEFT, padx=2)
     def on_engine_select(event=None):
-        global tts_engine
+        global tts_engine, engine_missing_deps
         # Stop playback and clear audio files when switching engine
         on_stop()
         # Remove both audio files to avoid mismatches
@@ -497,10 +433,17 @@ def create_control_window():
             pass
         tts_engine = engine_var.get()
         save_settings()
-        # Disable Read Clipboard button briefly to prevent race conditions
-        if hasattr(window, 'set_buttons_state'):
-            window.set_buttons_state('disabled')
-            window.after(500, lambda: hasattr(window, 'set_buttons_state') and window.set_buttons_state('normal'))
+        missing_deps = check_engine_dependencies(tts_engine)
+        if missing_deps:
+            safe_showwarning(
+                "Missing Dependencies",
+                "The selected TTS engine is missing:\n\n" + "\n".join(missing_deps),
+            )
+            window.set_buttons_state(True)
+            engine_missing_deps = True
+        else:
+            window.set_buttons_state(False)
+            engine_missing_deps = False
     engine_dropdown.bind("<<ComboboxSelected>>", on_engine_select)
 
     # Debug mode dropdown
@@ -563,11 +506,69 @@ def create_control_window():
     stop_btn.grid(row=1, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
     read_btn = ttk.Button(button_frame, text="📄 Read Clipboard", command=read_selected_text, width=12)
     read_btn.grid(row=3, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
+    def set_controls_state(disabled: bool):
+        try:
+            if not window.winfo_exists():
+                return
+        except Exception:
+            return
+        ttk_state = "disabled" if disabled else "!disabled"
+        play_btn.state([ttk_state])
+        pause_btn.state([ttk_state])
+        stop_btn.state([ttk_state])
+        read_btn.state([ttk_state])
+        speed_slider.state([ttk_state])
+    window.set_buttons_state = set_controls_state
     info = ttk.Label(window, text="Shortcuts:\nWin+Shift+T: Read Selected Text\nWin+Shift+R: Play\nWin+Shift+P: Pause\nWin+Shift+S: Stop", 
                      font=("Arial", 8), justify=tk.LEFT)
     info.pack(pady=10)
+    def safe_showwarning(title, message):
+        try:
+            if window.winfo_exists():
+                messagebox.showwarning(title, message)
+        except Exception:
+            pass
+
+    missing_map = []
+    for name in list_engines():
+        missing = check_engine_dependencies(name)
+        if missing:
+            missing_map.append(f"{name}: {', '.join(missing)}")
+    if debug_mode:
+        if missing_map:
+            print("🐛 [DEBUG] Missing engine dependencies found:")
+            for line in missing_map:
+                print(f"🐛 [DEBUG] {line}")
+        else:
+            print("🐛 [DEBUG] All engine dependencies satisfied")
+    if missing_map:
+        safe_showwarning(
+            "Missing TTS Dependencies",
+            "Some TTS engines are missing dependencies:\n\n" + "\n".join(missing_map),
+        )
+    current_missing = check_engine_dependencies(tts_engine)
+    if current_missing:
+        engine_missing_deps = True
+        window.set_buttons_state(True)
+    else:
+        engine_missing_deps = False
+        window.set_buttons_state(False)
     def update_status():
         global current_progress
+        try:
+            if not window.winfo_exists():
+                return
+        except Exception:
+            return
+        if engine_missing_deps:
+            play_btn.state(["disabled"])
+            pause_btn.state(["disabled"])
+            stop_btn.state(["disabled"])
+            read_btn.state(["disabled"])
+            speed_slider.state(["disabled"])
+            status_label.config(text="Status: Missing Dependencies")
+            window.after(500, update_status)
+            return
         if pygame.mixer.music.get_busy() or is_paused:
             if is_paused:
                 status_label.config(text="Status: Paused")
@@ -599,14 +600,29 @@ def create_control_window():
         else:
             pause_btn.state(["disabled"])
             stop_btn.state(["disabled"])
-        window.after(500, update_status)
+        try:
+            window.after(500, update_status)
+        except Exception:
+            pass
     update_status()
     def on_close():
         global is_running
         is_running = False
-        window.destroy()
-        os._exit(0)  # Force exit to stop all threads and tray
-    window.protocol("WM_DELETE_WINDOW", on_close)
+        try:
+            if tray_icon:
+                tray_icon.stop()
+        except Exception:
+            pass
+        try:
+            window.quit()
+            window.destroy()
+        except Exception:
+            pass
+    try:
+        if window.winfo_exists():
+            window.protocol("WM_DELETE_WINDOW", on_close)
+    except Exception:
+        pass
     control_window = window
     window.mainloop()
 
@@ -661,14 +677,15 @@ def clipboard_monitor():
 
 def run_tray():
     """Run the system tray icon (display only, no menu)"""
+    global tray_icon
     icon_path = ensure_lips_icon_file()
     try:
         image = Image.open(icon_path).convert("RGBA")
     except Exception:
         image = create_lips_icon()
-    icon = Icon("clipboard_reader_tray", image, title="Clipboard Reader")
+    tray_icon = Icon("clipboard_reader_tray", image, title="Clipboard Reader")
     print("System tray icon created.")
-    icon.run(setup=lambda icon: None)
+    tray_icon.run(setup=lambda icon: None)
 
 # Remove any leftover audio files from previous runs
 cleanup_audio_files()
@@ -680,9 +697,9 @@ monitor_thread.start()
 # Setup keyboard listener
 listener = setup_hotkeys()
 
-# Run control window in background thread
-window_thread = threading.Thread(target=create_control_window, daemon=False)
-window_thread.start()
+# Run system tray icon in background thread
+tray_thread = threading.Thread(target=run_tray, daemon=True)
+tray_thread.start()
 
 print("=" * 50)
 print("Clipboard Reader started")
@@ -697,9 +714,9 @@ print("\nControl window opening...")
 print("Lips icon in system tray...")
 print("=" * 50)
 
-# Run system tray icon on main thread (requires main event loop)
+# Run control window on main thread (Tkinter requires main thread)
 try:
-    run_tray()
+    create_control_window()
 except KeyboardInterrupt:
     pass
 

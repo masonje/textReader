@@ -6,13 +6,17 @@ Reads text aloud. Python version of text aloud mp3 to run on Linux, Windows, or 
 - Python 3.7+
 - The following Python packages (install with `pip install -r requirements.txt`):
 	- pyperclip
-	- gtts
+	- gtts (for gTTS engine)
+	- pyttsx3 (for pyttsx3 engine)
 	- pygame
 	- pystray
 	- Pillow
 	- pynput
+	- TTS (for Coqui TTS engine, requires Python 3.11 or lower)
 
 - ffmpeg (for audio speed control)
+- espeak-ng (for eSpeak-NG engine)
+- festival + text2wave (for Festival engine)
 
 ## ffmpeg Installation
 
@@ -34,6 +38,38 @@ Run the script:
 ```bash
 python reader.py
 ```
+
+## TTS Engines (tts_engines)
+
+Each TTS engine lives in the tts_engines directory and implements a common interface.
+
+- tts_engines/base.py
+	- Defines the `TTSEngine` base class
+	- Required fields: `name`, `output_ext`
+	- Required methods: `check_dependencies()`, `synthesize(text, output_path)`
+
+- tts_engines/__init__.py
+	- Auto-discovers engine modules named `engine_*.py`
+	- Registers all `TTSEngine` subclasses
+	- Exposes `list_engines()` and `get_engine(name)`
+
+### Included engines
+- gTTS: [tts_engines/engine_gtts.py](tts_engines/engine_gtts.py)
+- pyttsx3: [tts_engines/engine_pyttsx3.py](tts_engines/engine_pyttsx3.py)
+- eSpeak-NG: [tts_engines/engine_espeak.py](tts_engines/engine_espeak.py)
+- Festival: [tts_engines/engine_festival.py](tts_engines/engine_festival.py)
+- Coqui TTS: [tts_engines/engine_coqui.py](tts_engines/engine_coqui.py)
+
+### Adding a new engine
+1. Create a new engine file in tts_engines with the `engine_*.py` prefix (e.g., engine_mytts.py).
+2. Implement a subclass of `TTSEngine` with:
+	- `name`: what shows up in the UI dropdown
+	- `output_ext`: `mp3` or `wav`
+	- `check_dependencies()`: return a list of missing deps
+	- `synthesize(text, output_path)`: write audio to output_path
+3. No manual registration required. The module is auto-discovered on startup.
+
+The main app (reader.py) only calls `get_engine()` and `synthesize()` and does not contain per-engine logic.
 
 ## Creating a Standalone Executable (PyInstaller)
 
