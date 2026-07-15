@@ -27,7 +27,7 @@ class CoquiEngine(TTSEngine):
         try:
             import TTS  # noqa: F401
         except Exception:
-            missing.append("TTS")
+            missing.append("coqui-tts")
         return missing
 
     def synthesize(self, text: str, output_path: str) -> None:

@@ -12,7 +12,7 @@ Reads text aloud. Python version of text aloud mp3 to run on Linux, Windows, or 
 	- pystray
 	- Pillow
 	- pynput
-	- TTS (for Coqui TTS engine, requires Python 3.11 or lower)
+	- coqui-tts (for Coqui TTS engine, requires Python 3.11 or lower)
 
 - ffmpeg (for audio speed control)
 - espeak-ng (for eSpeak-NG engine)

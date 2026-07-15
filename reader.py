@@ -3,6 +3,7 @@
 import sys
 import shutil
 import json
+import math
 from pathlib import Path
 missing = []
 def check_dep(mod, pip_name=None):
@@ -18,7 +19,6 @@ check_dep('pystray')
 check_dep('PIL', 'Pillow')
 check_dep('pynput')
 check_dep('tkinter')
-check_dep('numpy')
 
 # Check ffmpeg
 if shutil.which('ffmpeg') is None:
@@ -377,7 +377,6 @@ def read_selected_text():
             print("⚠️ No text to read")
             # Play a short negative beep
             try:
-                import numpy as np
                 import wave
                 import struct
                 beep_path = SETTINGS_DIR / "negative_beep.wav"
@@ -385,14 +384,14 @@ def read_selected_text():
                 freq = 400      # Hz
                 sample_rate = 44100
                 n_samples = int(sample_rate * duration)
-                t = np.linspace(0, duration, n_samples, False)
-                tone = 0.5 * np.sin(2 * np.pi * freq * t)
                 # Save as WAV
                 with wave.open(str(beep_path), 'w') as wf:
                     wf.setnchannels(1)
                     wf.setsampwidth(2)
                     wf.setframerate(sample_rate)
-                    for s in tone:
+                    for sample_index in range(n_samples):
+                        t = sample_index / sample_rate
+                        s = 0.5 * math.sin(2 * math.pi * freq * t)
                         wf.writeframes(struct.pack('<h', int(s * 32767)))
                 pygame.mixer.music.load(str(beep_path))
                 pygame.mixer.music.play()
@@ -529,24 +528,17 @@ def create_control_window():
         except Exception:
             pass
 
-    missing_map = []
-    for name in list_engines():
-        missing = check_engine_dependencies(name)
-        if missing:
-            missing_map.append(f"{name}: {', '.join(missing)}")
+    current_missing = check_engine_dependencies(tts_engine)
     if debug_mode:
-        if missing_map:
-            print("🐛 [DEBUG] Missing engine dependencies found:")
-            for line in missing_map:
-                print(f"🐛 [DEBUG] {line}")
+        if current_missing:
+            print(f"🐛 [DEBUG] Missing deps for selected engine {tts_engine}: {current_missing}")
         else:
-            print("🐛 [DEBUG] All engine dependencies satisfied")
-    if missing_map:
+            print(f"🐛 [DEBUG] Selected engine {tts_engine} dependencies satisfied")
+    if current_missing:
         safe_showwarning(
             "Missing TTS Dependencies",
-            "Some TTS engines are missing dependencies:\n\n" + "\n".join(missing_map),
+            f"The selected TTS engine '{tts_engine}' is missing:\n\n" + "\n".join(current_missing),
         )
-    current_missing = check_engine_dependencies(tts_engine)
     if current_missing:
         engine_missing_deps = True
         window.set_buttons_state(True)
