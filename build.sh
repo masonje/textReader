@@ -28,7 +28,9 @@ echo "🚀 Running PyInstaller..."
 pyinstaller \
     --onefile \
     --windowed \
+    --icon "pireader.png" \
     --add-data "tts_engines:tts_engines" \
+    --add-data "pireader.png:." \
     --hidden-import=gtts \
     --hidden-import=pyttsx3 \
     --hidden-import=coqui_tts \

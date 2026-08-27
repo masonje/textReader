@@ -49,6 +49,13 @@ from tts_engines import get_engine, list_engines
 pygame.mixer.init()
 
 
+def resource_path(relative_path):
+    """Resolve a bundled resource path, whether running from source or a PyInstaller build."""
+    base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
+
+APP_ICON_PATH = resource_path("pireader.png")
+
 # Settings persistence
 SETTINGS_DIR = Path.home() / ".textReader"
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"
@@ -558,7 +565,7 @@ def read_selected_text():
 
 def create_control_window():
     global control_window, playback_speed, hotkeys
-    window = tk.Tk()
+    window = tk.Tk(className="reader")
     window.title("Clipboard Reader Control")
     window.geometry("280x380")
     window.resizable(False, False)
@@ -627,13 +634,16 @@ def create_control_window():
     debug_dropdown.bind("<<ComboboxSelected>>", on_debug_select)
     # Set window/taskbar icon
     try:
-        icon_path = ensure_lips_icon_file()
-        photo = tk.PhotoImage(file=icon_path)
         global taskbar_icon_photo
-        taskbar_icon_photo = photo
-        window.iconphoto(False, taskbar_icon_photo)
-    except:
-        pass
+        taskbar_icon_photo = tk.PhotoImage(file=APP_ICON_PATH)
+        window.iconphoto(True, taskbar_icon_photo)
+    except Exception:
+        try:
+            icon_path = ensure_lips_icon_file()
+            taskbar_icon_photo = tk.PhotoImage(file=icon_path)
+            window.iconphoto(True, taskbar_icon_photo)
+        except Exception:
+            pass
     # Status label
     status_label = ttk.Label(window, text="Status: Running", font=("Arial", 10))
     status_label.pack(pady=5)
@@ -905,11 +915,13 @@ def clipboard_monitor():
 def run_tray():
     """Run the system tray icon (display only, no menu)"""
     global tray_icon
-    icon_path = ensure_lips_icon_file()
     try:
-        image = Image.open(icon_path).convert("RGBA")
+        image = Image.open(APP_ICON_PATH).convert("RGBA")
     except Exception:
-        image = create_lips_icon()
+        try:
+            image = Image.open(ensure_lips_icon_file()).convert("RGBA")
+        except Exception:
+            image = create_lips_icon()
     tray_icon = Icon("clipboard_reader_tray", image, title="Clipboard Reader")
     print("System tray icon created.")
     tray_icon.run(setup=lambda icon: None)
