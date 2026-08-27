@@ -94,7 +94,24 @@ The main app (reader.py) only calls `get_engine()` and `synthesize()` and does n
 - Adjustable playback speed (0.5x–2x)
 - System tray icon
 - GUI controls
-- Keyboard shortcuts
+- Configurable keyboard shortcuts
+
+## Preferences
+Settings are saved in `~/.textReader/settings.json`. The control window includes a Shortcuts button that opens a shortcut preferences dialog with dropdowns for modifier and key choices. The same values can also be edited directly in JSON:
+
+```json
+{
+	"debug_mode": false,
+	"playback_speed": 1.0,
+	"tts_engine": "gTTS",
+	"hotkeys": {
+		"read_selected_text": "Win+Esc",
+		"play": "Win+Shift+R",
+		"pause": "Win+Shift+P",
+		"stop": "Win+Shift+S"
+	}
+}
+```
 
 ## Keyboard Shortcuts
 - **Win+Escape** — Read selected text

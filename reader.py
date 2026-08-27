@@ -53,18 +53,127 @@ pygame.mixer.init()
 SETTINGS_DIR = Path.home() / ".textReader"
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"
 SETTINGS_DIR.mkdir(exist_ok=True)
+
+DEFAULT_HOTKEYS = {
+    "read_selected_text": "Win+Esc",
+    "play": "Win+Shift+R",
+    "pause": "Win+Shift+P",
+    "stop": "Win+Shift+S",
+}
+HOTKEY_ORDER = ("read_selected_text", "play", "pause", "stop")
+HOTKEY_LABELS = {
+    "read_selected_text": "Read Selected Text",
+    "play": "Play/Resume",
+    "pause": "Pause",
+    "stop": "Stop",
+}
+MODIFIER_KEYS = {"win", "ctrl", "alt", "shift"}
+KEY_ALIASES = {
+    "cmd": "win",
+    "command": "win",
+    "super": "win",
+    "windows": "win",
+    "control": "ctrl",
+    "escape": "esc",
+    "return": "enter",
+}
+
+def normalize_hotkey_part(part):
+    key_name = part.strip().lower()
+    return KEY_ALIASES.get(key_name, key_name)
+
+def parse_hotkey(hotkey):
+    if not isinstance(hotkey, str):
+        return None
+    parts = [normalize_hotkey_part(part) for part in hotkey.split("+")]
+    parts = [part for part in parts if part]
+    combo = frozenset(parts)
+    if not combo or all(part in MODIFIER_KEYS for part in combo):
+        return None
+    return combo
+
+def format_hotkey(combo):
+    display_names = {
+        "win": "Win",
+        "ctrl": "Ctrl",
+        "alt": "Alt",
+        "shift": "Shift",
+        "esc": "Esc",
+        "enter": "Enter",
+        "space": "Space",
+        "tab": "Tab",
+        "backspace": "Backspace",
+        "delete": "Delete",
+    }
+    ordered_parts = [part for part in ("win", "ctrl", "alt", "shift") if part in combo]
+    ordered_parts.extend(sorted(part for part in combo if part not in MODIFIER_KEYS))
+    return "+".join(display_names.get(part, part.upper() if len(part) == 1 else part.title()) for part in ordered_parts)
+
+def hotkey_dropdown_values(hotkey):
+    combo = parse_hotkey(hotkey) or parse_hotkey(DEFAULT_HOTKEYS["play"])
+    modifier = "+".join(part for part in ("Win", "Ctrl", "Alt") if part.lower() in combo)
+    if "shift" in combo:
+        modifier = f"{modifier}+Shift" if modifier else "Shift"
+    key = next((part for part in combo if part not in MODIFIER_KEYS), "r")
+    return modifier or "Win", key.upper() if len(key) == 1 else key.title()
+
+def build_hotkey_from_dropdowns(modifier, key):
+    parts = [part.strip() for part in modifier.split("+") if part.strip()]
+    parts.append(key.strip())
+    return "+".join(parts)
+
+def validate_hotkey_settings(candidate_hotkeys):
+    normalized_hotkeys = {}
+    parsed_hotkeys = {}
+    errors = []
+    for action in HOTKEY_ORDER:
+        hotkey = candidate_hotkeys.get(action, DEFAULT_HOTKEYS[action])
+        combo = parse_hotkey(hotkey)
+        if combo is None:
+            errors.append(f"{HOTKEY_LABELS[action]} needs a key like Win+Shift+R or Ctrl+Alt+P.")
+            continue
+        normalized_hotkeys[action] = format_hotkey(combo)
+        parsed_hotkeys[action] = combo
+    seen = {}
+    for action, combo in parsed_hotkeys.items():
+        if combo in seen:
+            errors.append(f"{HOTKEY_LABELS[action]} duplicates {HOTKEY_LABELS[seen[combo]]}.")
+        seen[combo] = action
+    return normalized_hotkeys, errors
+
+def default_settings():
+    return {
+        "debug_mode": False,
+        "playback_speed": 1.0,
+        "tts_engine": "gTTS",
+        "hotkeys": DEFAULT_HOTKEYS.copy(),
+    }
+
+def normalize_loaded_hotkeys(raw_hotkeys):
+    loaded_hotkeys = DEFAULT_HOTKEYS.copy()
+    if isinstance(raw_hotkeys, dict):
+        loaded_hotkeys.update({action: raw_hotkeys.get(action, loaded_hotkeys[action]) for action in HOTKEY_ORDER})
+    normalized_hotkeys, errors = validate_hotkey_settings(loaded_hotkeys)
+    if errors:
+        return DEFAULT_HOTKEYS.copy()
+    return normalized_hotkeys
+
 def load_settings():
+    loaded_settings = default_settings()
     if SETTINGS_FILE.exists():
         try:
             with open(SETTINGS_FILE, "r") as f:
-                return json.load(f)
+                saved_settings = json.load(f)
+            if isinstance(saved_settings, dict):
+                loaded_settings.update(saved_settings)
+                loaded_settings["hotkeys"] = normalize_loaded_hotkeys(saved_settings.get("hotkeys"))
         except Exception:
             pass
-    return {"debug_mode": False, "playback_speed": 1.0, "tts_engine": "gTTS"}
+    return loaded_settings
 def save_settings():
     try:
         with open(SETTINGS_FILE, "w") as f:
-            json.dump({"debug_mode": debug_mode, "playback_speed": playback_speed, "tts_engine": tts_engine}, f)
+            json.dump({"debug_mode": debug_mode, "playback_speed": playback_speed, "tts_engine": tts_engine, "hotkeys": hotkeys}, f, indent=2)
     except Exception:
         pass
 
@@ -77,9 +186,12 @@ audio_file_mp3 = str(SETTINGS_DIR / "clipboard_speech.mp3")
 audio_file_wav = str(SETTINGS_DIR / "clipboard_speech.wav")
 cmd_pressed = False
 shift_pressed = False
+pressed_keys = set()
+active_hotkeys = set()
 control_window = None
 playback_speed = settings.get("playback_speed", 1.0)
 tts_engine = settings.get("tts_engine", "gTTS")
+hotkeys = settings.get("hotkeys", DEFAULT_HOTKEYS.copy())
 playback_start_time = None
 playback_pause_start = None
 playback_pause_accum = 0.0
@@ -136,6 +248,47 @@ def has_audio_file():
     except Exception:
         pass
     return False
+
+def key_name_for(key):
+    special_keys = {
+        "cmd": "win",
+        "cmd_l": "win",
+        "cmd_r": "win",
+        "ctrl": "ctrl",
+        "ctrl_l": "ctrl",
+        "ctrl_r": "ctrl",
+        "alt": "alt",
+        "alt_l": "alt",
+        "alt_r": "alt",
+        "alt_gr": "alt",
+        "shift": "shift",
+        "shift_l": "shift",
+        "shift_r": "shift",
+        "esc": "esc",
+        "enter": "enter",
+        "space": "space",
+        "tab": "tab",
+        "backspace": "backspace",
+        "delete": "delete",
+    }
+    for key_attr, key_name in special_keys.items():
+        if key == getattr(keyboard.Key, key_attr, None):
+            return key_name
+    if hasattr(key, 'char') and key.char:
+        return key.char.lower()
+    if hasattr(key, 'name') and key.name:
+        return normalize_hotkey_part(key.name)
+    return None
+
+def trigger_hotkey(action):
+    if action == "read_selected_text":
+        read_selected_text()
+    elif action == "play":
+        on_play()
+    elif action == "pause":
+        on_pause()
+    elif action == "stop":
+        on_stop()
 
 def create_lips_icon():
     """Create a lips icon for the system tray"""
@@ -404,11 +557,25 @@ def read_selected_text():
         print(f"Error: {e}")
 
 def create_control_window():
-    global control_window, playback_speed
+    global control_window, playback_speed, hotkeys
     window = tk.Tk()
     window.title("Clipboard Reader Control")
-    window.geometry("250x400")
+    window.geometry("280x380")
     window.resizable(False, False)
+
+    def safe_showwarning(title, message):
+        try:
+            if window.winfo_exists():
+                messagebox.showwarning(title, message)
+        except Exception:
+            pass
+
+    def safe_showerror(title, message):
+        try:
+            if window.winfo_exists():
+                messagebox.showerror(title, message)
+        except Exception:
+            pass
 
     # TTS engine dropdown
     engine_frame = ttk.Frame(window)
@@ -505,6 +672,76 @@ def create_control_window():
     stop_btn.grid(row=1, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
     read_btn = ttk.Button(button_frame, text="📄 Read Clipboard", command=read_selected_text, width=12)
     read_btn.grid(row=3, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
+
+    def apply_hotkey_preferences(candidate_hotkeys):
+        global hotkeys
+        normalized_hotkeys, errors = validate_hotkey_settings(candidate_hotkeys)
+        if errors:
+            safe_showerror("Invalid Shortcuts", "\n".join(errors))
+            return
+        hotkeys = normalized_hotkeys
+        save_settings()
+        return True
+
+    def open_shortcut_preferences():
+        dialog = tk.Toplevel(window)
+        dialog.title("Shortcut Preferences")
+        dialog.geometry("360x250")
+        dialog.resizable(False, False)
+        dialog.transient(window)
+        dialog.grab_set()
+
+        modifier_options = [
+            "Win",
+            "Win+Shift",
+            "Ctrl",
+            "Ctrl+Shift",
+            "Alt",
+            "Alt+Shift",
+            "Ctrl+Alt",
+            "Ctrl+Alt+Shift",
+        ]
+        key_options = ["Esc", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "Space", "Enter", "Tab"]
+        shortcut_vars = {}
+
+        ttk.Label(dialog, text="Action", font=("Arial", 9, "bold")).grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
+        ttk.Label(dialog, text="Modifier", font=("Arial", 9, "bold")).grid(row=0, column=1, sticky="w", padx=4, pady=(8, 4))
+        ttk.Label(dialog, text="Key", font=("Arial", 9, "bold")).grid(row=0, column=2, sticky="w", padx=4, pady=(8, 4))
+
+        for row_index, action in enumerate(HOTKEY_ORDER, start=1):
+            modifier, key = hotkey_dropdown_values(hotkeys.get(action, DEFAULT_HOTKEYS[action]))
+            modifier_var = tk.StringVar(value=modifier)
+            key_var = tk.StringVar(value=key)
+            shortcut_vars[action] = (modifier_var, key_var)
+            ttk.Label(dialog, text=HOTKEY_LABELS[action], font=("Arial", 8)).grid(row=row_index, column=0, sticky="w", padx=8, pady=4)
+            ttk.Combobox(dialog, textvariable=modifier_var, values=modifier_options, state="readonly", width=16).grid(row=row_index, column=1, sticky="ew", padx=4, pady=4)
+            ttk.Combobox(dialog, textvariable=key_var, values=key_options, state="readonly", width=8).grid(row=row_index, column=2, sticky="ew", padx=4, pady=4)
+
+        def selected_hotkeys():
+            return {
+                action: build_hotkey_from_dropdowns(modifier_var.get(), key_var.get())
+                for action, (modifier_var, key_var) in shortcut_vars.items()
+            }
+
+        def on_dialog_save():
+            if apply_hotkey_preferences(selected_hotkeys()):
+                dialog.destroy()
+
+        def on_dialog_reset():
+            for action, (modifier_var, key_var) in shortcut_vars.items():
+                modifier, key = hotkey_dropdown_values(DEFAULT_HOTKEYS[action])
+                modifier_var.set(modifier)
+                key_var.set(key)
+
+        button_row = ttk.Frame(dialog)
+        button_row.grid(row=len(HOTKEY_ORDER) + 1, column=0, columnspan=3, pady=12)
+        ttk.Button(button_row, text="Save", command=on_dialog_save, width=10).pack(side=tk.LEFT, padx=4)
+        ttk.Button(button_row, text="Reset", command=on_dialog_reset, width=10).pack(side=tk.LEFT, padx=4)
+        ttk.Button(button_row, text="Cancel", command=dialog.destroy, width=10).pack(side=tk.LEFT, padx=4)
+
+    shortcuts_btn = ttk.Button(window, text="Shortcuts...", command=open_shortcut_preferences, width=18)
+    shortcuts_btn.pack(pady=2)
+
     def set_controls_state(disabled: bool):
         try:
             if not window.winfo_exists():
@@ -517,16 +754,8 @@ def create_control_window():
         stop_btn.state([ttk_state])
         read_btn.state([ttk_state])
         speed_slider.state([ttk_state])
+        shortcuts_btn.state([ttk_state])
     window.set_buttons_state = set_controls_state
-    info = ttk.Label(window, text="Shortcuts:\nWin+Shift+T: Read Selected Text\nWin+Shift+R: Play\nWin+Shift+P: Pause\nWin+Shift+S: Stop", 
-                     font=("Arial", 8), justify=tk.LEFT)
-    info.pack(pady=10)
-    def safe_showwarning(title, message):
-        try:
-            if window.winfo_exists():
-                messagebox.showwarning(title, message)
-        except Exception:
-            pass
 
     current_missing = check_engine_dependencies(tts_engine)
     if debug_mode:
@@ -622,20 +851,19 @@ def on_press(key):
     """Handle keyboard press events"""
     global cmd_pressed, shift_pressed
     try:
+        key_name = key_name_for(key)
+        if key_name:
+            pressed_keys.add(key_name)
         if key == keyboard.Key.cmd_l or key == keyboard.Key.cmd_r:
             cmd_pressed = True
         elif key == keyboard.Key.shift or key == keyboard.Key.shift_r:
             shift_pressed = True
-        elif key == keyboard.Key.esc and cmd_pressed:  # Win+Escape - Read selected Text
-            read_selected_text()
-        elif cmd_pressed and shift_pressed:
-            if hasattr(key, 'char') and key.char:
-                if key.char.lower() == 'r':  # Win+Shift+R - Resume/Play
-                    on_play()
-                elif key.char.lower() == 'p':  # Win+Shift+P - Pause
-                    on_pause()
-                elif key.char.lower() == 's':  # Win+Shift+S - Stop
-                    on_stop()
+        for action in HOTKEY_ORDER:
+            combo = parse_hotkey(hotkeys.get(action, DEFAULT_HOTKEYS[action]))
+            if combo and combo.issubset(pressed_keys) and action not in active_hotkeys:
+                active_hotkeys.add(action)
+                trigger_hotkey(action)
+                break
     except AttributeError:
         pass
 
@@ -647,6 +875,13 @@ def on_release(key):
             cmd_pressed = False
         elif key == keyboard.Key.shift or key == keyboard.Key.shift_r:
             shift_pressed = False
+        key_name = key_name_for(key)
+        if key_name:
+            pressed_keys.discard(key_name)
+        for action in list(active_hotkeys):
+            combo = parse_hotkey(hotkeys.get(action, DEFAULT_HOTKEYS[action]))
+            if not combo or not combo.issubset(pressed_keys):
+                active_hotkeys.discard(action)
     except AttributeError:
         pass
 
@@ -698,10 +933,8 @@ print("Clipboard Reader started")
 print("=" * 50)
 print("📋 Using Google Text-to-Speech")
 print("\n🎮 Keyboard Controls:")
-print("  Win+Shift+T  - Read Selected Text")
-print("  Win+Shift+R  - Play/Resume")
-print("  Win+Shift+P  - Pause")
-print("  Win+Shift+S  - Stop")
+for action in HOTKEY_ORDER:
+    print(f"  {hotkeys.get(action, DEFAULT_HOTKEYS[action])}  - {HOTKEY_LABELS[action]}")
 print("\nControl window opening...")
 print("Lips icon in system tray...")
 print("=" * 50)
