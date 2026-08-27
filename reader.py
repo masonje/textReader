@@ -626,6 +626,8 @@ def on_press(key):
             cmd_pressed = True
         elif key == keyboard.Key.shift or key == keyboard.Key.shift_r:
             shift_pressed = True
+        elif key == keyboard.Key.esc and cmd_pressed:  # Win+Escape - Read selected Text
+            read_selected_text()
         elif cmd_pressed and shift_pressed:
             if hasattr(key, 'char') and key.char:
                 if key.char.lower() == 'r':  # Win+Shift+R - Resume/Play
@@ -634,8 +636,6 @@ def on_press(key):
                     on_pause()
                 elif key.char.lower() == 's':  # Win+Shift+S - Stop
                     on_stop()
-                elif key.char.lower() == 't':  # Win+Shift+T - Read selected Text
-                    read_selected_text()
     except AttributeError:
         pass
 

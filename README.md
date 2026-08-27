@@ -95,3 +95,9 @@ The main app (reader.py) only calls `get_engine()` and `synthesize()` and does n
 - System tray icon
 - GUI controls
 - Keyboard shortcuts
+
+## Keyboard Shortcuts
+- **Win+Escape** — Read selected text
+- **Win+Shift+R** — Resume/Play
+- **Win+Shift+P** — Pause
+- **Win+Shift+S** — Stop
