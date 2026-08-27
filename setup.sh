@@ -18,7 +18,11 @@ sudo apt-get install -y \
 	ffmpeg \
 	xclip \
 	espeak-ng \
-	festival
+	festival \
+	libsdl2-dev \
+	libsdl2-mixer-dev \
+	pkg-config \
+	libfreetype-dev
 
 echo "All required system packages installed."
 
@@ -36,6 +40,7 @@ if [ ! -f "$REQ_FILE" ]; then
 fi
 "$SCRIPT_DIR/.venv/bin/python" -m pip install --upgrade pip
 "$SCRIPT_DIR/.venv/bin/python" -m pip install -r "$REQ_FILE"
+"$SCRIPT_DIR/.venv/bin/python" -m pip install --force-reinstall --no-cache-dir pygame==2.6.1
 
 # Ensure run.sh is executable
 chmod +x "$SCRIPT_DIR/run.sh"
