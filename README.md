@@ -1,6 +1,8 @@
 # Clipboard Reader
 Reads text aloud. Python version of text aloud mp3 to run on Linux, Windows, or macOS.
 
+**Version:** 1.1.0 — see [Changelog](#changelog) for what changed in each version.
+
 ## Requirements
 
 - Python 3.7+
@@ -46,7 +48,9 @@ Each TTS engine lives in the tts_engines directory and implements a common inter
 - tts_engines/base.py
 	- Defines the `TTSEngine` base class
 	- Required fields: `name`, `output_ext`
-	- Required methods: `check_dependencies()`, `synthesize(text, output_path)`
+	- Required methods: `check_dependencies()`, `synthesize(text, output_path, cancel_event=None)`
+	- `run_cancellable(cmd, cancel_event, input_text=None)`: helper that runs an external command and kills it if the build is cancelled
+	- `SynthesisCancelled`: exception an engine raises when it stops because of a cancel
 
 - tts_engines/__init__.py
 	- Auto-discovers engine modules named `engine_*.py`
@@ -66,10 +70,14 @@ Each TTS engine lives in the tts_engines directory and implements a common inter
 	- `name`: what shows up in the UI dropdown
 	- `output_ext`: `mp3` or `wav`
 	- `check_dependencies()`: return a list of missing deps
-	- `synthesize(text, output_path)`: write audio to output_path
+	- `synthesize(text, output_path, cancel_event=None)`: write audio to output_path. Check `cancel_event.is_set()` where you can and raise `SynthesisCancelled`; for external commands use `run_cancellable()`. Engines that can't be interrupted can ignore it, and the app throws away their output.
 3. No manual registration required. The module is auto-discovered on startup.
 
 The main app (reader.py) only calls `get_engine()` and `synthesize()` and does not contain per-engine logic.
+
+## Build and Install (Linux)
+
+`./install.sh` builds a single-file executable with PyInstaller (via `build.sh`), copies it to `~/.local/bin/reader`, installs the icon set, and adds a "Screen Reader" launcher to the app menu.
 
 ## Creating a Standalone Executable (PyInstaller)
 
@@ -118,3 +126,26 @@ Settings are saved in `~/.textReader/settings.json`. The control window includes
 - **Win+Shift+R** — Resume/Play
 - **Win+Shift+P** — Pause
 - **Win+Shift+S** — Stop
+
+## Changelog
+
+The version number is also stored in `__version__` at the top of `reader.py`.
+
+### 1.1.0 — 2026-11-12
+- **Fixed:** Cancel in the "Building MP3" dialog sometimes did nothing, or let the audio keep building and then play.
+	- The dialog is now always created and updated on the Tk main thread. Hotkey reads are handed to it instead of opening the dialog from the keyboard-listener thread.
+	- Cancel, the window's close button, and Esc close the dialog immediately.
+	- Builds really stop: Festival and eSpeak-NG processes are killed, and gTTS stops between text chunks. pyttsx3 and Coqui can't be interrupted, so their output is thrown away.
+	- Audio is built into a temporary file and only replaces the playback file if the build wasn't cancelled. Leftover temporary files are removed at startup.
+	- The Stop hotkey/button cancels a build in progress, and starting a new read cancels the previous build.
+- **Changed:** `TTSEngine.synthesize()` takes an optional `cancel_event`. Added the `run_cancellable()` helper and the `SynthesisCancelled` exception in `tts_engines/base.py`.
+- **Changed:** eSpeak-NG reads its text from stdin, so text starting with `-` isn't treated as an option.
+
+### 1.0.0 — 2026-08-27
+First versioned baseline, covering everything up to this point:
+- Clipboard and selected-text reading with play, pause, stop, and adjustable speed (0.5x–2x).
+- Pluggable TTS engines in `tts_engines/`: gTTS, pyttsx3, eSpeak-NG, Festival, and Coqui TTS.
+- Configurable keyboard shortcuts with a preferences dialog, saved to `~/.textReader/settings.json`.
+- System tray icon and control window.
+- Ubuntu 26.04 support.
+- `build.sh` and `install.sh` for a PyInstaller build with an app-menu launcher and icon.

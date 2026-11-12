@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import threading
-from typing import List
+from typing import List, Optional
 
 from .base import TTSEngine
 
@@ -30,7 +30,13 @@ class Pyttsx3Engine(TTSEngine):
             missing.append("pyttsx3")
         return missing
 
-    def synthesize(self, text: str, output_path: str) -> None:
+    def synthesize(
+        self,
+        text: str,
+        output_path: str,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> None:
+        # Can't be interrupted mid-run; on cancel the caller discards the output.
         engine = _get_engine()
         with _pyttsx3_lock:
             try:

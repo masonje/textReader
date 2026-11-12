@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
-from typing import List
+import threading
+from typing import List, Optional
 
-from .base import TTSEngine
+from .base import TTSEngine, run_cancellable
 
 
 class FestivalEngine(TTSEngine):
@@ -17,11 +17,10 @@ class FestivalEngine(TTSEngine):
             missing.append("festival (system package)")
         return missing
 
-    def synthesize(self, text: str, output_path: str) -> None:
-        subprocess.run(
-            ["text2wave", "-o", output_path],
-            input=text,
-            text=True,
-            check=False,
-            timeout=20,
-        )
+    def synthesize(
+        self,
+        text: str,
+        output_path: str,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> None:
+        run_cancellable(["text2wave", "-o", output_path], cancel_event, input_text=text)

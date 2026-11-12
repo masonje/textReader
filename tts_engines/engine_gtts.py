@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import List
+import threading
+from typing import List, Optional
 
-from .base import TTSEngine
+from .base import SynthesisCancelled, TTSEngine
 
 
 class GTTSEngine(TTSEngine):
@@ -17,8 +18,18 @@ class GTTSEngine(TTSEngine):
             missing.append("gTTS")
         return missing
 
-    def synthesize(self, text: str, output_path: str) -> None:
+    def synthesize(
+        self,
+        text: str,
+        output_path: str,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> None:
         from gtts import gTTS
 
         tts = gTTS(text=text, lang="en", slow=False)
-        tts.save(output_path)
+        # gTTS fetches audio one text chunk at a time; check for cancel between chunks.
+        with open(output_path, "wb") as f:
+            for chunk in tts.stream():
+                if cancel_event is not None and cancel_event.is_set():
+                    raise SynthesisCancelled()
+                f.write(chunk)

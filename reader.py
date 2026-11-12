@@ -1,4 +1,6 @@
 
+__version__ = "1.1.0"
+
 # Dependency check
 import sys
 import shutil
@@ -36,6 +38,7 @@ import time
 import pygame
 import os
 import threading
+import queue
 import wave
 from pystray import Icon
 from PIL import Image, ImageDraw
@@ -44,6 +47,7 @@ import tkinter as tk
 from tkinter import ttk
 from tkinter import messagebox
 from tts_engines import get_engine, list_engines
+from tts_engines.base import SynthesisCancelled
 
 # Initialize pygame mixer for audio playback
 pygame.mixer.init()
@@ -207,6 +211,10 @@ current_progress = 0.0
 taskbar_icon_photo = None
 engine_missing_deps = False
 tray_icon = None
+current_build = None      # cancel Event for the audio build in progress, if any
+build_counter = 0
+# Tk is only safe to touch from the main thread; other threads queue calls here.
+main_thread_calls = queue.Queue()
 
 def get_output_path(engine_name):
     """Return output path based on engine output format."""
@@ -244,6 +252,9 @@ def cleanup_audio_files():
         temp_speed_file = str(SETTINGS_DIR / "clipboard_speech_speed.mp3")
         if os.path.exists(temp_speed_file):
             os.remove(temp_speed_file)
+        # Partial files from builds that were cancelled or interrupted
+        for leftover in SETTINGS_DIR.glob("clipboard_speech.building*"):
+            leftover.unlink(missing_ok=True)
     except Exception:
         pass
 
@@ -289,7 +300,8 @@ def key_name_for(key):
 
 def trigger_hotkey(action):
     if action == "read_selected_text":
-        read_selected_text()
+        # Hotkeys fire on the pynput thread; the build dialog must be created on Tk's thread.
+        main_thread_calls.put(read_selected_text)
     elif action == "play":
         on_play()
     elif action == "pause":
@@ -447,6 +459,8 @@ def on_stop():
     playback_pause_accum = 0.0
     current_audio_duration = 0.0
     current_progress = 0.0
+    if current_build is not None:
+        current_build.set()
     pygame.mixer.music.stop()
     print("⏹ Stopped")
 
@@ -457,6 +471,123 @@ def toggle_debug():
     save_settings()
     status = "ON" if debug_mode else "OFF"
     print(f"🐛 Debug mode: {status}")
+
+def start_build(text):
+    """Synthesize `text` in the background with a cancellable progress dialog.
+
+    Must run on the Tk main thread. The worker thread never touches Tk; it
+    reports back through a queue that the main thread polls.
+    """
+    global current_build, build_counter
+    if current_build is not None:
+        current_build.set()  # starting a new read cancels the previous build
+
+    cancel_event = threading.Event()
+    current_build = cancel_event
+    build_counter += 1
+    engine_name = tts_engine
+    final_path = get_output_path(engine_name)
+    root, ext = os.path.splitext(final_path)
+    # Build into a private file so a cancelled or stale build never clobbers the real one.
+    temp_path = f"{root}.building{build_counter}{ext}"
+    results = queue.Queue()
+
+    def remove_temp():
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception:
+            pass
+
+    def worker():
+        try:
+            engine = get_engine(engine_name)
+            if engine is None:
+                results.put(("error", "Unknown TTS engine"))
+                return
+            missing_deps = engine.check_dependencies()
+            if missing_deps:
+                results.put(("error", f"Missing: {', '.join(missing_deps)}"))
+                return
+            engine.synthesize(text, temp_path, cancel_event)
+            if cancel_event.is_set():
+                raise SynthesisCancelled()
+            if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+                results.put(("error", "Engine produced no audio"))
+                return
+            results.put(("done", None))
+        except SynthesisCancelled:
+            results.put(("cancelled", None))
+        except Exception as e:
+            results.put(("error", str(e)))
+
+    dialog = tk.Toplevel(control_window)
+    dialog.title("Building MP3")
+    dialog.geometry("300x100")
+    dialog.attributes("-topmost", True)
+    label = ttk.Label(dialog, text="Building MP3 for playback...", font=("Arial", 10))
+    label.pack(pady=10)
+    progress = ttk.Progressbar(dialog, orient=tk.HORIZONTAL, length=200, mode="indeterminate")
+    progress.pack(pady=(0, 5))
+    progress.start(10)
+
+    def close_dialog():
+        try:
+            if dialog.winfo_exists():
+                dialog.destroy()
+        except Exception:
+            pass
+
+    def on_cancel():
+        if not cancel_event.is_set():
+            cancel_event.set()
+            print("✖ Cancelled audio build")
+        close_dialog()
+
+    cancel_btn = ttk.Button(dialog, text="Cancel", command=on_cancel)
+    cancel_btn.pack(pady=5)
+    dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+    dialog.bind("<Escape>", lambda _e: on_cancel())
+
+    def finish():
+        global current_build
+        if current_build is cancel_event:
+            current_build = None
+
+    def poll():
+        if cancel_event.is_set():
+            close_dialog()  # e.g. cancelled by the Stop hotkey or a newer read
+        try:
+            status, message = results.get_nowait()
+        except queue.Empty:
+            control_window.after(100, poll)
+            return
+        finish()
+        if status == "done" and not cancel_event.is_set():
+            close_dialog()
+            try:
+                os.replace(temp_path, final_path)
+            except Exception as e:
+                print(f"Error saving audio: {e}")
+                remove_temp()
+                return
+            threading.Thread(target=play_audio, daemon=True).start()
+            return
+        remove_temp()
+        if status == "error" and not cancel_event.is_set():
+            print(f"Error building audio: {message}")
+            try:
+                progress.stop()
+                label.config(text=f"Error: {message}", foreground="red")
+                cancel_btn.config(text="Close")
+            except Exception:
+                pass
+            control_window.after(2000, close_dialog)
+        else:
+            close_dialog()
+
+    threading.Thread(target=worker, daemon=True).start()
+    control_window.after(100, poll)
 
 def read_selected_text():
     """Read the currently selected text from clipboard"""
@@ -492,47 +623,7 @@ def read_selected_text():
                 print(f"🐛 [DEBUG] {repr(current_text)}\n")
             print(f"Speaking: {current_text[:50]}...")
 
-            # Show modal dialog with cancel button
-            cancel_flag = {'cancel': False}
-            def build_audio():
-                try:
-                    engine = get_engine(tts_engine)
-                    if engine is None:
-                        label.config(text="Error: Unknown TTS engine", foreground="red")
-                        time.sleep(2)
-                        return
-                    missing_deps = engine.check_dependencies()
-                    if missing_deps:
-                        label.config(text=f"Missing: {', '.join(missing_deps)}", foreground="red")
-                        time.sleep(2)
-                        return
-                    output_path = get_output_path(tts_engine)
-                    engine.synthesize(current_text, output_path)
-                    if not cancel_flag['cancel']:
-                        threading.Thread(target=play_audio, daemon=True).start()
-                except Exception as e:
-                    label.config(text=f"Error: {e}", foreground="red")
-                    time.sleep(2)
-                finally:
-                    dialog.destroy()
-
-            dialog = tk.Toplevel(control_window)
-            dialog.title("Building MP3")
-            dialog.geometry("300x100")
-            dialog.attributes("-topmost", True)
-            dialog.grab_set()
-            label = ttk.Label(dialog, text="Building MP3 for playback...", font=("Arial", 10))
-            label.pack(pady=10)
-            progress = ttk.Progressbar(dialog, orient=tk.HORIZONTAL, length=200, mode="indeterminate")
-            progress.pack(pady=(0, 5))
-            progress.start(10)
-            def on_cancel():
-                cancel_flag['cancel'] = True
-                dialog.destroy()
-            cancel_btn = ttk.Button(dialog, text="Cancel", command=on_cancel)
-            cancel_btn.pack(pady=5)
-            threading.Thread(target=build_audio, daemon=True).start()
-            dialog.wait_window()
+            start_build(current_text)
         else:
             print("⚠️ No text to read")
             # Play a short negative beep
@@ -855,6 +946,19 @@ def create_control_window():
     except Exception:
         pass
     control_window = window
+
+    def pump_main_thread_calls():
+        while True:
+            try:
+                func = main_thread_calls.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                func()
+            except Exception as e:
+                print(f"Error: {e}")
+        window.after(50, pump_main_thread_calls)
+    window.after(50, pump_main_thread_calls)
     window.mainloop()
 
 def on_press(key):
@@ -941,7 +1045,7 @@ tray_thread = threading.Thread(target=run_tray, daemon=True)
 tray_thread.start()
 
 print("=" * 50)
-print("Clipboard Reader started")
+print(f"Clipboard Reader {__version__} started")
 print("=" * 50)
 print("📋 Using Google Text-to-Speech")
 print("\n🎮 Keyboard Controls:")
