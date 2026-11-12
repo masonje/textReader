@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
-from typing import List
+import threading
+from typing import List, Optional
 
-from .base import TTSEngine
+from .base import TTSEngine, run_cancellable
 
 
 class EspeakEngine(TTSEngine):
@@ -17,9 +17,10 @@ class EspeakEngine(TTSEngine):
             missing.append("espeak-ng (system package)")
         return missing
 
-    def synthesize(self, text: str, output_path: str) -> None:
-        subprocess.run(
-            ["espeak-ng", "-w", output_path, text],
-            check=False,
-            timeout=20,
-        )
+    def synthesize(
+        self,
+        text: str,
+        output_path: str,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> None:
+        run_cancellable(["espeak-ng", "-w", output_path, "--stdin"], cancel_event, input_text=text)

@@ -1,6 +1,13 @@
 
+__version__ = "1.1.0"
+
 # Dependency check
 import sys
+
+if "--version" in sys.argv[1:]:
+    print(f"Clipboard Reader {__version__}")
+    sys.exit(0)
+
 import shutil
 import json
 import math
@@ -36,6 +43,7 @@ import time
 import pygame
 import os
 import threading
+import queue
 import wave
 from pystray import Icon
 from PIL import Image, ImageDraw
@@ -43,7 +51,9 @@ from pynput import keyboard
 import tkinter as tk
 from tkinter import ttk
 from tkinter import messagebox
+import tkinter.font as tkfont
 from tts_engines import get_engine, list_engines
+from tts_engines.base import SynthesisCancelled
 
 # Initialize pygame mixer for audio playback
 pygame.mixer.init()
@@ -154,6 +164,7 @@ def default_settings():
         "playback_speed": 1.0,
         "tts_engine": "gTTS",
         "hotkeys": DEFAULT_HOTKEYS.copy(),
+        "theme": "auto",
     }
 
 def normalize_loaded_hotkeys(raw_hotkeys):
@@ -180,7 +191,7 @@ def load_settings():
 def save_settings():
     try:
         with open(SETTINGS_FILE, "w") as f:
-            json.dump({"debug_mode": debug_mode, "playback_speed": playback_speed, "tts_engine": tts_engine, "hotkeys": hotkeys}, f, indent=2)
+            json.dump({"debug_mode": debug_mode, "playback_speed": playback_speed, "tts_engine": tts_engine, "hotkeys": hotkeys, "theme": ui_theme}, f, indent=2)
     except Exception:
         pass
 
@@ -199,6 +210,7 @@ control_window = None
 playback_speed = settings.get("playback_speed", 1.0)
 tts_engine = settings.get("tts_engine", "gTTS")
 hotkeys = settings.get("hotkeys", DEFAULT_HOTKEYS.copy())
+ui_theme = settings.get("theme", "auto")  # "auto" follows the desktop, or "dark" / "light"
 playback_start_time = None
 playback_pause_start = None
 playback_pause_accum = 0.0
@@ -207,6 +219,10 @@ current_progress = 0.0
 taskbar_icon_photo = None
 engine_missing_deps = False
 tray_icon = None
+current_build = None      # cancel Event for the audio build in progress, if any
+build_counter = 0
+# Tk is only safe to touch from the main thread; other threads queue calls here.
+main_thread_calls = queue.Queue()
 
 def get_output_path(engine_name):
     """Return output path based on engine output format."""
@@ -244,6 +260,9 @@ def cleanup_audio_files():
         temp_speed_file = str(SETTINGS_DIR / "clipboard_speech_speed.mp3")
         if os.path.exists(temp_speed_file):
             os.remove(temp_speed_file)
+        # Partial files from builds that were cancelled or interrupted
+        for leftover in SETTINGS_DIR.glob("clipboard_speech.building*"):
+            leftover.unlink(missing_ok=True)
     except Exception:
         pass
 
@@ -289,7 +308,8 @@ def key_name_for(key):
 
 def trigger_hotkey(action):
     if action == "read_selected_text":
-        read_selected_text()
+        # Hotkeys fire on the pynput thread; the build dialog must be created on Tk's thread.
+        main_thread_calls.put(read_selected_text)
     elif action == "play":
         on_play()
     elif action == "pause":
@@ -447,6 +467,8 @@ def on_stop():
     playback_pause_accum = 0.0
     current_audio_duration = 0.0
     current_progress = 0.0
+    if current_build is not None:
+        current_build.set()
     pygame.mixer.music.stop()
     print("⏹ Stopped")
 
@@ -457,6 +479,122 @@ def toggle_debug():
     save_settings()
     status = "ON" if debug_mode else "OFF"
     print(f"🐛 Debug mode: {status}")
+
+def start_build(text):
+    """Synthesize `text` in the background with a cancellable progress dialog.
+
+    Must run on the Tk main thread. The worker thread never touches Tk; it
+    reports back through a queue that the main thread polls.
+    """
+    global current_build, build_counter
+    if current_build is not None:
+        current_build.set()  # starting a new read cancels the previous build
+
+    cancel_event = threading.Event()
+    current_build = cancel_event
+    build_counter += 1
+    engine_name = tts_engine
+    final_path = get_output_path(engine_name)
+    root, ext = os.path.splitext(final_path)
+    # Build into a private file so a cancelled or stale build never clobbers the real one.
+    temp_path = f"{root}.building{build_counter}{ext}"
+    results = queue.Queue()
+
+    def remove_temp():
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception:
+            pass
+
+    def worker():
+        try:
+            engine = get_engine(engine_name)
+            if engine is None:
+                results.put(("error", "Unknown TTS engine"))
+                return
+            missing_deps = engine.check_dependencies()
+            if missing_deps:
+                results.put(("error", f"Missing: {', '.join(missing_deps)}"))
+                return
+            engine.synthesize(text, temp_path, cancel_event)
+            if cancel_event.is_set():
+                raise SynthesisCancelled()
+            if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+                results.put(("error", "Engine produced no audio"))
+                return
+            results.put(("done", None))
+        except SynthesisCancelled:
+            results.put(("cancelled", None))
+        except Exception as e:
+            results.put(("error", str(e)))
+
+    dialog, content = themed_toplevel(control_window, "Building Audio")
+    dialog.attributes("-topmost", True)
+    label = ttk.Label(content, text="Building audio for playback…")
+    label.pack(anchor="w")
+    progress = ttk.Progressbar(content, orient=tk.HORIZONTAL, length=240, mode="indeterminate")
+    progress.pack(fill=tk.X, pady=(10, 12))
+    progress.start(10)
+
+    def close_dialog():
+        try:
+            if dialog.winfo_exists():
+                dialog.destroy()
+        except Exception:
+            pass
+
+    def on_cancel():
+        if not cancel_event.is_set():
+            cancel_event.set()
+            print("✖ Cancelled audio build")
+        close_dialog()
+
+    cancel_btn = ttk.Button(content, text="Cancel", command=on_cancel)
+    cancel_btn.pack(anchor="e")
+    dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+    dialog.bind("<Escape>", lambda _e: on_cancel())
+
+    def finish():
+        global current_build
+        if current_build is cancel_event:
+            current_build = None
+
+    def poll():
+        if cancel_event.is_set():
+            close_dialog()  # e.g. cancelled by the Stop hotkey or a newer read
+        try:
+            status, message = results.get_nowait()
+        except queue.Empty:
+            control_window.after(100, poll)
+            return
+        finish()
+        if status == "done" and not cancel_event.is_set():
+            close_dialog()
+            try:
+                os.replace(temp_path, final_path)
+            except Exception as e:
+                print(f"Error saving audio: {e}")
+                remove_temp()
+                return
+            threading.Thread(target=play_audio, daemon=True).start()
+            return
+        remove_temp()
+        if status == "error" and not cancel_event.is_set():
+            print(f"Error building audio: {message}")
+            try:
+                progress.stop()
+                progress.pack_forget()
+                label.config(text=f"Error: {message}", style="Error.TLabel", wraplength=240)
+                cancel_btn.config(text="Close")
+            except Exception:
+                pass
+            control_window.after(2000, close_dialog)
+        else:
+            close_dialog()
+
+    threading.Thread(target=worker, daemon=True).start()
+    control_window.after(100, poll)
 
 def read_selected_text():
     """Read the currently selected text from clipboard"""
@@ -492,47 +630,7 @@ def read_selected_text():
                 print(f"🐛 [DEBUG] {repr(current_text)}\n")
             print(f"Speaking: {current_text[:50]}...")
 
-            # Show modal dialog with cancel button
-            cancel_flag = {'cancel': False}
-            def build_audio():
-                try:
-                    engine = get_engine(tts_engine)
-                    if engine is None:
-                        label.config(text="Error: Unknown TTS engine", foreground="red")
-                        time.sleep(2)
-                        return
-                    missing_deps = engine.check_dependencies()
-                    if missing_deps:
-                        label.config(text=f"Missing: {', '.join(missing_deps)}", foreground="red")
-                        time.sleep(2)
-                        return
-                    output_path = get_output_path(tts_engine)
-                    engine.synthesize(current_text, output_path)
-                    if not cancel_flag['cancel']:
-                        threading.Thread(target=play_audio, daemon=True).start()
-                except Exception as e:
-                    label.config(text=f"Error: {e}", foreground="red")
-                    time.sleep(2)
-                finally:
-                    dialog.destroy()
-
-            dialog = tk.Toplevel(control_window)
-            dialog.title("Building MP3")
-            dialog.geometry("300x100")
-            dialog.attributes("-topmost", True)
-            dialog.grab_set()
-            label = ttk.Label(dialog, text="Building MP3 for playback...", font=("Arial", 10))
-            label.pack(pady=10)
-            progress = ttk.Progressbar(dialog, orient=tk.HORIZONTAL, length=200, mode="indeterminate")
-            progress.pack(pady=(0, 5))
-            progress.start(10)
-            def on_cancel():
-                cancel_flag['cancel'] = True
-                dialog.destroy()
-            cancel_btn = ttk.Button(dialog, text="Cancel", command=on_cancel)
-            cancel_btn.pack(pady=5)
-            threading.Thread(target=build_audio, daemon=True).start()
-            dialog.wait_window()
+            start_build(current_text)
         else:
             print("⚠️ No text to read")
             # Play a short negative beep
@@ -563,35 +661,189 @@ def read_selected_text():
     except Exception as e:
         print(f"Error: {e}")
 
+# ---------------------------------------------------------------------------
+# Theme: one palette drives every window and dialog so light/dark stay consistent
+# ---------------------------------------------------------------------------
+PALETTES = {
+    "dark": {
+        "bg": "#232629", "surface": "#2c3034", "field": "#1b1e20",
+        "button": "#383d42", "hover": "#43494f", "pressed": "#2f3438",
+        "border": "#4a5056", "fg": "#e8eaed", "muted": "#9aa0a6", "disabled": "#6b7177",
+        "accent": "#3d8fd6", "accent_hover": "#4f9de0", "accent_pressed": "#357fbf", "accent_fg": "#ffffff",
+        "error": "#f28b82",
+    },
+    "light": {
+        "bg": "#f3f4f6", "surface": "#e9ebee", "field": "#ffffff",
+        "button": "#e3e6ea", "hover": "#d7dbe0", "pressed": "#cbd0d6",
+        "border": "#c3c8ce", "fg": "#1f2328", "muted": "#5f6670", "disabled": "#a0a6ad",
+        "accent": "#2f6fb5", "accent_hover": "#3a7cc4", "accent_pressed": "#285f9b", "accent_fg": "#ffffff",
+        "error": "#c5221f",
+    },
+}
+PALETTE = PALETTES["light"]
+_theme_fonts = {}
+
+def system_prefers_dark():
+    """Best-effort check of the desktop's light/dark preference."""
+    import subprocess
+    try:
+        if sys.platform.startswith("linux"):
+            def gsetting(key):
+                return subprocess.run(
+                    ["gsettings", "get", "org.gnome.desktop.interface", key],
+                    capture_output=True, text=True, timeout=1, check=False,
+                ).stdout.lower()
+            if "dark" in gsetting("color-scheme"):
+                return True
+            return "dark" in gsetting("gtk-theme")
+        if sys.platform == "darwin":
+            out = subprocess.run(
+                ["defaults", "read", "-g", "AppleInterfaceStyle"],
+                capture_output=True, text=True, timeout=1, check=False,
+            ).stdout
+            return "dark" in out.lower()
+        if sys.platform == "win32":
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
+                return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
+    except Exception:
+        pass
+    return False
+
+def apply_theme(root):
+    """Style all ttk widgets, classic Tk widgets and dialogs from one palette."""
+    global PALETTE
+    mode = ui_theme if ui_theme in PALETTES else ("dark" if system_prefers_dark() else "light")
+    PALETTE = p = PALETTES[mode]
+
+    default_font = tkfont.nametofont("TkDefaultFont")
+    default_font.configure(size=10)
+    for name in ("TkTextFont", "TkMenuFont"):
+        try:
+            tkfont.nametofont(name).configure(family=default_font.cget("family"), size=10)
+        except Exception:
+            pass
+    _theme_fonts["small"] = small = default_font.copy()
+    small.configure(size=9)
+    _theme_fonts["bold"] = bold = default_font.copy()
+    bold.configure(weight="bold")
+
+    style = ttk.Style(root)
+    style.theme_use("clam")  # fully recolorable on every platform
+    style.configure(".", background=p["bg"], foreground=p["fg"], fieldbackground=p["field"],
+                    bordercolor=p["border"], lightcolor=p["bg"], darkcolor=p["bg"],
+                    troughcolor=p["field"], focuscolor=p["accent"], selectbackground=p["accent"],
+                    selectforeground=p["accent_fg"], insertcolor=p["fg"], arrowcolor=p["fg"],
+                    font=default_font)
+    style.map(".", foreground=[("disabled", p["disabled"])])
+
+    style.configure("TFrame", background=p["bg"])
+    style.configure("TLabel", background=p["bg"], foreground=p["fg"])
+    style.configure("Muted.TLabel", foreground=p["muted"], font=small)
+    style.configure("Header.TLabel", font=bold)
+    style.configure("Error.TLabel", foreground=p["error"])
+
+    style.configure("TButton", background=p["button"], foreground=p["fg"], bordercolor=p["border"],
+                    lightcolor=p["button"], darkcolor=p["button"], focuscolor=p["button"],
+                    padding=(10, 5), anchor="center")
+    style.map("TButton",
+              background=[("disabled", p["surface"]), ("pressed", p["pressed"]), ("active", p["hover"])],
+              lightcolor=[("disabled", p["surface"]), ("pressed", p["pressed"]), ("active", p["hover"])],
+              darkcolor=[("disabled", p["surface"]), ("pressed", p["pressed"]), ("active", p["hover"])],
+              focuscolor=[("disabled", p["surface"]), ("pressed", p["pressed"]), ("active", p["hover"])],
+              foreground=[("disabled", p["disabled"])])
+    style.configure("Accent.TButton", background=p["accent"], foreground=p["accent_fg"],
+                    bordercolor=p["accent"], lightcolor=p["accent"], darkcolor=p["accent"],
+                    focuscolor=p["accent"])
+    style.map("Accent.TButton",
+              background=[("disabled", p["surface"]), ("pressed", p["accent_pressed"]), ("active", p["accent_hover"])],
+              lightcolor=[("disabled", p["surface"]), ("pressed", p["accent_pressed"]), ("active", p["accent_hover"])],
+              darkcolor=[("disabled", p["surface"]), ("pressed", p["accent_pressed"]), ("active", p["accent_hover"])],
+              focuscolor=[("disabled", p["surface"]), ("pressed", p["accent_pressed"]), ("active", p["accent_hover"])],
+              bordercolor=[("disabled", p["border"])],
+              foreground=[("disabled", p["disabled"])])
+
+    style.configure("TCombobox", fieldbackground=p["field"], background=p["button"], foreground=p["fg"],
+                    arrowcolor=p["fg"], bordercolor=p["border"], lightcolor=p["field"],
+                    darkcolor=p["field"], padding=(6, 3))
+    style.map("TCombobox",
+              fieldbackground=[("disabled", p["surface"]), ("readonly", p["field"])],
+              selectbackground=[("readonly", p["field"])],
+              selectforeground=[("readonly", p["fg"])],
+              background=[("disabled", p["surface"]), ("active", p["hover"]), ("readonly", p["button"])],
+              bordercolor=[("focus", p["accent"])],
+              arrowcolor=[("disabled", p["disabled"])],
+              foreground=[("disabled", p["disabled"])])
+    style.configure("ComboboxPopdownFrame", background=p["field"], bordercolor=p["border"],
+                    lightcolor=p["border"], darkcolor=p["border"], relief="solid", borderwidth=1)
+    # The combobox drop-down list is a classic Tk listbox
+    root.option_add("*TCombobox*Listbox.background", p["field"])
+    root.option_add("*TCombobox*Listbox.foreground", p["fg"])
+    root.option_add("*TCombobox*Listbox.selectBackground", p["accent"])
+    root.option_add("*TCombobox*Listbox.selectForeground", p["accent_fg"])
+    root.option_add("*TCombobox*Listbox.font", default_font)
+
+    style.configure("Horizontal.TScale", background=p["button"], troughcolor=p["field"],
+                    bordercolor=p["border"], lightcolor=p["button"], darkcolor=p["button"])
+    style.map("Horizontal.TScale", background=[("disabled", p["surface"]), ("active", p["hover"])])
+    style.configure("Horizontal.TProgressbar", background=p["accent"], troughcolor=p["field"],
+                    bordercolor=p["border"], lightcolor=p["accent"], darkcolor=p["accent"], thickness=8)
+
+    # Classic Tk widgets and the built-in message boxes
+    root.option_add("*background", p["bg"])
+    root.option_add("*foreground", p["fg"])
+    root.option_add("*activeBackground", p["hover"])
+    root.option_add("*activeForeground", p["fg"])
+    root.option_add("*highlightBackground", p["bg"])
+    root.option_add("*Font", default_font)
+    root.configure(background=p["bg"])
+    if debug_mode:
+        print(f"🐛 [DEBUG] UI theme: {mode} (setting: {ui_theme})")
+
+def themed_toplevel(parent, title):
+    """A dialog window with the app's background and a padded content frame."""
+    dialog = tk.Toplevel(parent)
+    dialog.title(title)
+    dialog.configure(background=PALETTE["bg"])
+    dialog.resizable(False, False)
+    content = ttk.Frame(dialog, padding=14)
+    content.pack(fill=tk.BOTH, expand=True)
+    return dialog, content
+
 def create_control_window():
     global control_window, playback_speed, hotkeys
     window = tk.Tk(className="reader")
-    window.title("Clipboard Reader Control")
-    window.geometry("280x380")
+    window.title(f"Clipboard Reader v{__version__}")
     window.resizable(False, False)
+    apply_theme(window)
 
     def safe_showwarning(title, message):
         try:
             if window.winfo_exists():
-                messagebox.showwarning(title, message)
+                messagebox.showwarning(title, message, parent=window)
         except Exception:
             pass
 
     def safe_showerror(title, message):
         try:
             if window.winfo_exists():
-                messagebox.showerror(title, message)
+                messagebox.showerror(title, message, parent=window)
         except Exception:
             pass
 
-    # TTS engine dropdown
-    engine_frame = ttk.Frame(window)
-    engine_frame.pack(pady=5)
-    engine_label = ttk.Label(engine_frame, text="TTS Engine:", font=("Arial", 9))
-    engine_label.pack(side=tk.LEFT, padx=2)
+    content = ttk.Frame(window, padding=(16, 14, 16, 8))
+    content.pack(fill=tk.BOTH, expand=True)
+
+    # Settings form: label column + control column, aligned
+    form = ttk.Frame(content)
+    form.pack(fill=tk.X)
+    form.columnconfigure(1, weight=1)
+
+    ttk.Label(form, text="Engine").grid(row=0, column=0, sticky="w", padx=(0, 10), pady=3)
     engine_var = tk.StringVar(value=tts_engine)
-    engine_dropdown = ttk.Combobox(engine_frame, textvariable=engine_var, values=list_engines(), state="readonly", width=12)
-    engine_dropdown.pack(side=tk.LEFT, padx=2)
+    engine_dropdown = ttk.Combobox(form, textvariable=engine_var, values=list_engines(), state="readonly", width=14)
+    engine_dropdown.grid(row=0, column=1, columnspan=2, sticky="ew", pady=3)
     def on_engine_select(event=None):
         global tts_engine, engine_missing_deps
         # Stop playback and clear audio files when switching engine
@@ -619,19 +871,31 @@ def create_control_window():
             engine_missing_deps = False
     engine_dropdown.bind("<<ComboboxSelected>>", on_engine_select)
 
-    # Debug mode dropdown
-    debug_frame = ttk.Frame(window)
-    debug_frame.pack(pady=2)
-    debug_label = ttk.Label(debug_frame, text="Debug Mode:", font=("Arial", 9))
-    debug_label.pack(side=tk.LEFT, padx=2)
+    ttk.Label(form, text="Debug").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=3)
     debug_var = tk.StringVar(value="ON" if debug_mode else "OFF")
-    debug_dropdown = ttk.Combobox(debug_frame, textvariable=debug_var, values=["ON", "OFF"], state="readonly", width=6)
-    debug_dropdown.pack(side=tk.LEFT, padx=2)
+    debug_dropdown = ttk.Combobox(form, textvariable=debug_var, values=["ON", "OFF"], state="readonly", width=14)
+    debug_dropdown.grid(row=1, column=1, columnspan=2, sticky="ew", pady=3)
     def on_debug_select(event=None):
         global debug_mode
         debug_mode = (debug_var.get() == "ON")
         save_settings()
     debug_dropdown.bind("<<ComboboxSelected>>", on_debug_select)
+
+    ttk.Label(form, text="Speed").grid(row=2, column=0, sticky="w", padx=(0, 10), pady=3)
+    speed_var = tk.DoubleVar(value=playback_speed)
+    def on_speed_change(val):
+        global playback_speed
+        v = round(float(val) * 10) / 10.0
+        if abs(v - speed_var.get()) > 1e-6:
+            speed_var.set(v)
+        playback_speed = v
+        save_settings()
+        slider_value_label.config(text=f"{playback_speed:.1f}x")
+    speed_slider = ttk.Scale(form, from_=0.5, to=2.0, orient=tk.HORIZONTAL, variable=speed_var, command=on_speed_change, length=130)
+    speed_slider.grid(row=2, column=1, sticky="ew", pady=3)
+    slider_value_label = ttk.Label(form, text=f"{playback_speed:.1f}x", width=4, anchor="e")
+    slider_value_label.grid(row=2, column=2, sticky="e", padx=(8, 0), pady=3)
+
     # Set window/taskbar icon
     try:
         global taskbar_icon_photo
@@ -644,44 +908,29 @@ def create_control_window():
             window.iconphoto(True, taskbar_icon_photo)
         except Exception:
             pass
-    # Status label
-    status_label = ttk.Label(window, text="Status: Running", font=("Arial", 10))
-    status_label.pack(pady=5)
-    # Speed slider
-    speed_frame = ttk.Frame(window)
-    speed_frame.pack(pady=5)
-    speed_label = ttk.Label(speed_frame, text="Speed:", font=("Arial", 9))
-    speed_label.pack(side=tk.LEFT, padx=2)
-    speed_var = tk.DoubleVar(value=playback_speed)
-    def on_speed_change(val):
-        global playback_speed
-        v = round(float(val) * 10) / 10.0
-        if abs(v - speed_var.get()) > 1e-6:
-            speed_var.set(v)
-        playback_speed = v
-        save_settings()
-        slider_value_label.config(text=f"{playback_speed:.2f}x")
-    speed_slider = ttk.Scale(speed_frame, from_=0.5, to=2.0, orient=tk.HORIZONTAL, variable=speed_var, command=on_speed_change, length=120)
-    speed_slider.pack(side=tk.LEFT, padx=2)
-    slider_value_label = ttk.Label(speed_frame, text=f"{playback_speed:.2f}x", font=("Arial", 9))
-    slider_value_label.pack(side=tk.LEFT, padx=2)
-    # Progress bar
-    progress_label = ttk.Label(window, text="Progress:", font=("Arial", 9))
-    progress_label.pack(pady=(5, 2))
+
+    ttk.Separator(content).pack(fill=tk.X, pady=(12, 10))
+
+    # Status and playback progress
+    status_label = ttk.Label(content, text="Running", style="Header.TLabel")
+    status_label.pack(anchor="w")
     progress_var = tk.DoubleVar(value=0.0)
-    progress_bar = ttk.Progressbar(window, orient=tk.HORIZONTAL, length=200, mode="determinate", maximum=100, variable=progress_var)
-    progress_bar.pack(pady=(0, 5))
-    # Button frame
-    button_frame = ttk.Frame(window)
-    button_frame.pack(pady=10)
-    play_btn = ttk.Button(button_frame, text="▶ Play", command=on_play, width=12)
-    play_btn.grid(row=0, column=0, padx=5, pady=5)
-    pause_btn = ttk.Button(button_frame, text="⏸ Pause", command=on_pause, width=12)
-    pause_btn.grid(row=0, column=1, padx=5, pady=5)
-    stop_btn = ttk.Button(button_frame, text="⏹ Stop", command=on_stop, width=12)
-    stop_btn.grid(row=1, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
-    read_btn = ttk.Button(button_frame, text="📄 Read Clipboard", command=read_selected_text, width=12)
-    read_btn.grid(row=3, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
+    progress_bar = ttk.Progressbar(content, orient=tk.HORIZONTAL, mode="determinate", maximum=100, variable=progress_var)
+    progress_bar.pack(fill=tk.X, pady=(6, 12))
+
+    # Playback buttons
+    button_frame = ttk.Frame(content)
+    button_frame.pack(fill=tk.X)
+    button_frame.columnconfigure(0, weight=1, uniform="btn")
+    button_frame.columnconfigure(1, weight=1, uniform="btn")
+    play_btn = ttk.Button(button_frame, text="▶  Play", command=on_play)
+    play_btn.grid(row=0, column=0, padx=(0, 4), pady=3, sticky="ew")
+    pause_btn = ttk.Button(button_frame, text="❚❚  Pause", command=on_pause)
+    pause_btn.grid(row=0, column=1, padx=(4, 0), pady=3, sticky="ew")
+    stop_btn = ttk.Button(button_frame, text="■  Stop", command=on_stop)
+    stop_btn.grid(row=1, column=0, columnspan=2, pady=3, sticky="ew")
+    read_btn = ttk.Button(button_frame, text="Read Clipboard", command=read_selected_text, style="Accent.TButton")
+    read_btn.grid(row=2, column=0, columnspan=2, pady=(3, 3), sticky="ew")
 
     def apply_hotkey_preferences(candidate_hotkeys):
         global hotkeys
@@ -694,10 +943,7 @@ def create_control_window():
         return True
 
     def open_shortcut_preferences():
-        dialog = tk.Toplevel(window)
-        dialog.title("Shortcut Preferences")
-        dialog.geometry("360x250")
-        dialog.resizable(False, False)
+        dialog, body = themed_toplevel(window, "Shortcut Preferences")
         dialog.transient(window)
         dialog.grab_set()
 
@@ -714,18 +960,18 @@ def create_control_window():
         key_options = ["Esc", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "Space", "Enter", "Tab"]
         shortcut_vars = {}
 
-        ttk.Label(dialog, text="Action", font=("Arial", 9, "bold")).grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
-        ttk.Label(dialog, text="Modifier", font=("Arial", 9, "bold")).grid(row=0, column=1, sticky="w", padx=4, pady=(8, 4))
-        ttk.Label(dialog, text="Key", font=("Arial", 9, "bold")).grid(row=0, column=2, sticky="w", padx=4, pady=(8, 4))
+        ttk.Label(body, text="Action", style="Header.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 10), pady=(0, 6))
+        ttk.Label(body, text="Modifier", style="Header.TLabel").grid(row=0, column=1, sticky="w", padx=4, pady=(0, 6))
+        ttk.Label(body, text="Key", style="Header.TLabel").grid(row=0, column=2, sticky="w", padx=4, pady=(0, 6))
 
         for row_index, action in enumerate(HOTKEY_ORDER, start=1):
             modifier, key = hotkey_dropdown_values(hotkeys.get(action, DEFAULT_HOTKEYS[action]))
             modifier_var = tk.StringVar(value=modifier)
             key_var = tk.StringVar(value=key)
             shortcut_vars[action] = (modifier_var, key_var)
-            ttk.Label(dialog, text=HOTKEY_LABELS[action], font=("Arial", 8)).grid(row=row_index, column=0, sticky="w", padx=8, pady=4)
-            ttk.Combobox(dialog, textvariable=modifier_var, values=modifier_options, state="readonly", width=16).grid(row=row_index, column=1, sticky="ew", padx=4, pady=4)
-            ttk.Combobox(dialog, textvariable=key_var, values=key_options, state="readonly", width=8).grid(row=row_index, column=2, sticky="ew", padx=4, pady=4)
+            ttk.Label(body, text=HOTKEY_LABELS[action]).grid(row=row_index, column=0, sticky="w", padx=(0, 10), pady=3)
+            ttk.Combobox(body, textvariable=modifier_var, values=modifier_options, state="readonly", width=16).grid(row=row_index, column=1, sticky="ew", padx=4, pady=3)
+            ttk.Combobox(body, textvariable=key_var, values=key_options, state="readonly", width=8).grid(row=row_index, column=2, sticky="ew", padx=4, pady=3)
 
         def selected_hotkeys():
             return {
@@ -743,14 +989,22 @@ def create_control_window():
                 modifier_var.set(modifier)
                 key_var.set(key)
 
-        button_row = ttk.Frame(dialog)
-        button_row.grid(row=len(HOTKEY_ORDER) + 1, column=0, columnspan=3, pady=12)
-        ttk.Button(button_row, text="Save", command=on_dialog_save, width=10).pack(side=tk.LEFT, padx=4)
-        ttk.Button(button_row, text="Reset", command=on_dialog_reset, width=10).pack(side=tk.LEFT, padx=4)
-        ttk.Button(button_row, text="Cancel", command=dialog.destroy, width=10).pack(side=tk.LEFT, padx=4)
+        button_row = ttk.Frame(body)
+        button_row.grid(row=len(HOTKEY_ORDER) + 1, column=0, columnspan=3, sticky="ew", pady=(14, 0))
+        ttk.Button(button_row, text="Reset", command=on_dialog_reset, width=8).pack(side=tk.LEFT)
+        ttk.Button(button_row, text="Save", command=on_dialog_save, width=8, style="Accent.TButton").pack(side=tk.RIGHT)
+        ttk.Button(button_row, text="Cancel", command=dialog.destroy, width=8).pack(side=tk.RIGHT, padx=(0, 6))
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
 
-    shortcuts_btn = ttk.Button(window, text="Shortcuts...", command=open_shortcut_preferences, width=18)
-    shortcuts_btn.pack(pady=2)
+    shortcuts_btn = ttk.Button(button_frame, text="Shortcuts…", command=open_shortcut_preferences)
+    shortcuts_btn.grid(row=3, column=0, columnspan=2, pady=(3, 0), sticky="ew")
+
+    version_label = ttk.Label(content, text=f"Version {__version__}", style="Muted.TLabel")
+    version_label.pack(pady=(12, 0))
+
+    # Wide enough that the title bar shows the full name and version
+    window.update_idletasks()
+    window.minsize(max(window.winfo_reqwidth(), 320), window.winfo_reqheight())
 
     def set_controls_state(disabled: bool):
         try:
@@ -797,14 +1051,14 @@ def create_control_window():
             stop_btn.state(["disabled"])
             read_btn.state(["disabled"])
             speed_slider.state(["disabled"])
-            status_label.config(text="Status: Missing Dependencies")
+            status_label.config(text="Missing dependencies")
             window.after(500, update_status)
             return
         if pygame.mixer.music.get_busy() or is_paused:
             if is_paused:
-                status_label.config(text="Status: Paused")
+                status_label.config(text="Paused")
             else:
-                status_label.config(text="Status: Playing")
+                status_label.config(text="Playing")
             speed_slider.state(["disabled"])
             if playback_start_time and current_audio_duration > 0:
                 if not is_paused:
@@ -815,12 +1069,9 @@ def create_control_window():
             else:
                 progress_var.set(0.0)
         else:
-            status_label.config(text="Status: Stopped")
+            status_label.config(text="Stopped")
             speed_slider.state(["!disabled"])
             progress_var.set(0.0)
-        debug_text = "Debug: ON" if debug_mode else "Debug: OFF"
-        debug_color = "green" if debug_mode else "gray"
-        debug_label.config(text=debug_text, foreground=debug_color)
         if has_audio_file():
             play_btn.state(["!disabled"])
         else:
@@ -855,6 +1106,19 @@ def create_control_window():
     except Exception:
         pass
     control_window = window
+
+    def pump_main_thread_calls():
+        while True:
+            try:
+                func = main_thread_calls.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                func()
+            except Exception as e:
+                print(f"Error: {e}")
+        window.after(50, pump_main_thread_calls)
+    window.after(50, pump_main_thread_calls)
     window.mainloop()
 
 def on_press(key):
@@ -941,7 +1205,7 @@ tray_thread = threading.Thread(target=run_tray, daemon=True)
 tray_thread.start()
 
 print("=" * 50)
-print("Clipboard Reader started")
+print(f"Clipboard Reader {__version__} started")
 print("=" * 50)
 print("📋 Using Google Text-to-Speech")
 print("\n🎮 Keyboard Controls:")
