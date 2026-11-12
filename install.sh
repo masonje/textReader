@@ -16,8 +16,10 @@ echo "Building reader executable..."
 
 echo "Installing executable to $BIN_DIR..."
 mkdir -p "$BIN_DIR"
-cp "$SCRIPT_DIR/dist/reader" "$BIN_DIR/reader"
-chmod +x "$BIN_DIR/reader"
+# Temp copy + rename so this works even while the app is running
+cp "$SCRIPT_DIR/dist/reader" "$BIN_DIR/.reader.new"
+chmod +x "$BIN_DIR/.reader.new"
+mv -f "$BIN_DIR/.reader.new" "$BIN_DIR/reader"
 
 echo "Generating icon set from $ICON_SOURCE..."
 PYTHON="$SCRIPT_DIR/.venv/bin/python"

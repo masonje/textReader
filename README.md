@@ -112,6 +112,7 @@ Settings are saved in `~/.textReader/settings.json`. The control window includes
 	"debug_mode": false,
 	"playback_speed": 1.0,
 	"tts_engine": "gTTS",
+	"theme": "auto",
 	"hotkeys": {
 		"read_selected_text": "Win+Esc",
 		"play": "Win+Shift+R",
@@ -120,6 +121,12 @@ Settings are saved in `~/.textReader/settings.json`. The control window includes
 	}
 }
 ```
+
+`theme` can be `"auto"` (follow the desktop's light/dark setting), `"dark"`, or `"light"`.
+
+## Checking the Version
+- The control window shows the version in its title bar and at the bottom of the window.
+- From a terminal: `reader --version` (or `python reader.py --version`).
 
 ## Keyboard Shortcuts
 - **Win+Escape** — Read selected text
@@ -132,6 +139,10 @@ Settings are saved in `~/.textReader/settings.json`. The control window includes
 The version number is also stored in `__version__` at the top of `reader.py`.
 
 ### 1.1.0 — 2026-11-12
+- **Added:** The version is shown in the control window's title bar and footer, and `--version` prints it.
+- **Added:** Light and dark themes. The app follows the desktop's light/dark setting (GNOME `color-scheme`, macOS, or Windows), or you can set `"theme"` in settings.json. The control window, Shortcut Preferences, the build dialog, drop-down lists, and message boxes all use the same colors.
+- **Changed:** Cleaner control window layout with aligned Engine/Debug/Speed rows, full-width buttons, and Read Clipboard as the main action. The "Building MP3" dialog is now "Building Audio", since most engines produce WAV.
+- **Fixed:** `install.sh` and `build.sh` failed with "Text file busy" when the app was running. They now copy to a temporary file and rename it into place.
 - **Fixed:** Cancel in the "Building MP3" dialog sometimes did nothing, or let the audio keep building and then play.
 	- The dialog is now always created and updated on the Tk main thread. Hotkey reads are handed to it instead of opening the dialog from the keyboard-listener thread.
 	- Cancel, the window's close button, and Esc close the dialog immediately.

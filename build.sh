@@ -39,5 +39,10 @@ pyinstaller \
 echo "✅ Build complete!"
 echo "📁 Executable location: dist/reader"
 
-cp ./dist/reader ~/.local/bin/
+# Copy to a temp name, then rename: replacing the file in one step works even
+# while the app is running (a plain cp fails with "Text file busy").
+mkdir -p ~/.local/bin
+cp ./dist/reader ~/.local/bin/.reader.new
+mv -f ~/.local/bin/.reader.new ~/.local/bin/reader
+echo "📦 Installed to ~/.local/bin/reader (restart the app to use the new build)"
 
