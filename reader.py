@@ -190,6 +190,8 @@ def default_settings():
         "view_mode": "compact",
         "full_window_size": "",
         "voices": {},
+        "disabled_engines": [],
+        "disabled_voices": {},
     }
 
 def normalize_loaded_hotkeys(raw_hotkeys):
@@ -216,7 +218,9 @@ def load_settings():
 def save_settings():
     try:
         with open(SETTINGS_FILE, "w") as f:
-            json.dump({"debug_mode": debug_mode, "playback_speed": playback_speed, "tts_engine": tts_engine, "hotkeys": hotkeys, "theme": ui_theme, "view_mode": view_mode, "full_window_size": full_window_size, "voices": engine_voices}, f, indent=2)
+            json.dump({"debug_mode": debug_mode, "playback_speed": playback_speed, "tts_engine": tts_engine, "hotkeys": hotkeys, "theme": ui_theme, "view_mode": view_mode, "full_window_size": full_window_size, "voices": engine_voices,
+                       "disabled_engines": sorted(disabled_engines),
+                       "disabled_voices": {k: sorted(v) for k, v in disabled_voices.items() if v}}, f, indent=2)
     except Exception:
         pass
 
@@ -239,6 +243,19 @@ ui_theme = settings.get("theme", "auto")  # "auto" follows the desktop, or "dark
 view_mode = settings.get("view_mode", "compact")  # "compact" (controls only) or "full"
 full_window_size = settings.get("full_window_size", "")  # "WxH" remembered for full mode
 engine_voices = settings.get("voices", {})  # engine name -> chosen voice id
+# Engines and voices hidden from the drop-downs (managed in the full view)
+disabled_engines = set(settings.get("disabled_engines", []) or [])
+disabled_voices = {k: set(v) for k, v in (settings.get("disabled_voices", {}) or {}).items()}
+
+def enabled_engines():
+    """Engine names to offer, in display order (all of them if everything was disabled)."""
+    names = sorted(list_engines(), key=str.lower)
+    return [n for n in names if n not in disabled_engines] or names
+
+def enabled_voices(engine_name, voices):
+    """The voices to offer for an engine (all of them if every voice was disabled)."""
+    off = disabled_voices.get(engine_name, set())
+    return [v for v in voices if v[0] not in off] or list(voices)
 if not isinstance(engine_voices, dict):
     engine_voices = {}
 
@@ -878,6 +895,12 @@ def apply_theme(root):
               bordercolor=[("disabled", p["border"])],
               foreground=[("disabled", p["disabled"])])
 
+    style.configure("Treeview", background=p["field"], fieldbackground=p["field"], foreground=p["fg"],
+                    bordercolor=p["border"], lightcolor=p["field"], darkcolor=p["field"], rowheight=24)
+    style.map("Treeview", background=[("selected", p["accent"])], foreground=[("selected", p["accent_fg"])])
+    style.configure("Treeview.Heading", background=p["button"], foreground=p["fg"], bordercolor=p["border"],
+                    lightcolor=p["button"], darkcolor=p["button"], font=bold)
+    style.map("Treeview.Heading", background=[("active", p["hover"])])
     style.configure("TCombobox", fieldbackground=p["field"], background=p["button"], foreground=p["fg"],
                     arrowcolor=p["fg"], bordercolor=p["border"], lightcolor=p["field"],
                     darkcolor=p["field"], padding=(6, 3))
@@ -990,7 +1013,7 @@ def create_control_window():
 
     ttk.Label(form, text="Engine").grid(row=0, column=0, sticky="w", padx=(0, 10), pady=3)
     engine_var = tk.StringVar(value=tts_engine)
-    engine_dropdown = ttk.Combobox(form, textvariable=engine_var, values=sorted(list_engines(), key=str.lower), state="readonly", width=14)
+    engine_dropdown = ttk.Combobox(form, textvariable=engine_var, values=enabled_engines(), state="readonly", width=14)
     engine_dropdown.grid(row=0, column=1, columnspan=2, sticky="ew", pady=3)
     def on_engine_select(event=None):
         global tts_engine, engine_missing_deps
@@ -1129,6 +1152,7 @@ def create_control_window():
         if engine_name != tts_engine:
             return  # the user switched engines while this list was loading
         voice_choices["engine"] = engine_name
+        voices = enabled_voices(engine_name, voices)
         voice_choices["ids"] = [voice_id for voice_id, _ in voices]
         if not voices:
             voice_dropdown.configure(values=["Default"], state="disabled")
@@ -1326,6 +1350,155 @@ def create_control_window():
         debug_mode = (debug_var.get() == "ON")
         save_settings()
     debug_dropdown.bind("<<ComboboxSelected>>", on_debug_select)
+    manage_btn = ttk.Button(options_form, text="Engines & Voices…", command=lambda: open_engine_manager())
+    manage_btn.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 3))
+
+    def refresh_engine_choices():
+        """Re-apply enable/disable settings to the Engine and Voice lists."""
+        names = enabled_engines()
+        engine_dropdown.configure(values=names)
+        if tts_engine not in names:
+            engine_var.set(names[0])
+            on_engine_select()  # the current engine was turned off: switch to the first one on
+        else:
+            load_voices(tts_engine, show_loading=False)
+
+    def open_engine_manager():
+        """Turn engines and individual voices on or off (what the drop-downs offer)."""
+        dialog, body = themed_toplevel(window, "Engines & Voices")
+        dialog.transient(window)
+        dialog.resizable(True, True)
+        ttk.Label(body, text="Choose which engines and voices appear in the drop-downs. "
+                             "Click a row to turn it on or off.", wraplength=440).pack(anchor="w")
+        tree_frame = ttk.Frame(body)
+        tree_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 8))
+        tree = ttk.Treeview(tree_frame, show="tree", selectmode="browse", height=16)
+        tree.column("#0", width=420)
+        scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree.tag_configure("off", foreground=PALETTE["disabled"])
+        tree.tag_configure("engine", font=_theme_fonts["bold"])
+        note = ttk.Label(body, text="", style="Muted.TLabel")
+        note.pack(anchor="w")
+        buttons = ttk.Frame(body)
+        buttons.pack(fill=tk.X, pady=(10, 0))
+
+        all_names = sorted(list_engines(), key=str.lower)
+        voice_lists = {}   # engine -> [(voice_id, label)]
+        rows = {}          # tree item -> ("engine", name) or ("voice", name, voice_id)
+
+        def box(on):
+            return "☑" if on else "☐"
+
+        def engine_text(name):
+            text = f"{box(name not in disabled_engines)}  {name}"
+            voices = voice_lists.get(name)
+            if voices:
+                on = sum(1 for v, _ in voices if v not in disabled_voices.get(name, set()))
+                text += f"   ({on} of {len(voices)} voices on)"
+            elif voices is None:
+                text += "   (loading voices…)"
+            missing = get_engine(name).check_dependencies()
+            if missing:
+                text += "   – not installed"
+            return text
+
+        def redraw(name):
+            item = engine_items[name]
+            tree.item(item, text=engine_text(name), tags=("engine",) + (("off",) if name in disabled_engines else ()))
+            for child in tree.get_children(item):
+                kind = rows.get(child)
+                if kind and kind[0] == "voice":
+                    on = kind[2] not in disabled_voices.get(name, set())
+                    label = dict(voice_lists.get(name, [])).get(kind[2], kind[2])
+                    tree.item(child, text=f"{box(on)}  {label}",
+                              tags=() if on and name not in disabled_engines else ("off",))
+
+        engine_items = {}
+        for name in all_names:
+            item = tree.insert("", tk.END, text="", open=False)
+            engine_items[name] = item
+            rows[item] = ("engine", name)
+            redraw(name)
+
+        def fill_voices(name, voices):
+            voice_lists[name] = voices
+            item = engine_items[name]
+            for child in tree.get_children(item):
+                tree.delete(child)
+            for voice_id, _ in voices:
+                child = tree.insert(item, tk.END, text="")
+                rows[child] = ("voice", name, voice_id)
+            redraw(name)
+
+        def load_all():
+            for name in all_names:
+                engine = get_engine(name)
+                try:
+                    voices = engine.list_voices() if not engine.check_dependencies() else []
+                except Exception:
+                    voices = []
+                main_thread_calls.put(lambda n=name, v=voices: dialog.winfo_exists() and fill_voices(n, v))
+        threading.Thread(target=load_all, daemon=True).start()
+
+        def changed():
+            save_settings()
+            refresh_engine_choices()
+
+        def toggle(item):
+            kind = rows.get(item)
+            if not kind:
+                return
+            note.config(text="")
+            if kind[0] == "engine":
+                name = kind[1]
+                if name in disabled_engines:
+                    disabled_engines.discard(name)
+                elif len([n for n in all_names if n not in disabled_engines]) <= 1:
+                    note.config(text="At least one engine has to stay on.")
+                    return
+                else:
+                    disabled_engines.add(name)
+            else:
+                _, name, voice_id = kind
+                off = disabled_voices.setdefault(name, set())
+                if voice_id in off:
+                    off.discard(voice_id)
+                elif len(voice_lists.get(name, [])) - len(off) <= 1:
+                    note.config(text=f"At least one {name} voice has to stay on.")
+                    return
+                else:
+                    off.add(voice_id)
+            redraw(kind[1])
+            changed()
+
+        def on_click(event):
+            item = tree.identify_row(event.y)
+            # Clicking the expand arrow only opens/closes the engine
+            if item and tree.identify_element(event.x, event.y) not in ("Treeitem.indicator", "indicator"):
+                toggle(item)
+        tree.bind("<ButtonRelease-1>", on_click)
+        tree.bind("<space>", lambda e: toggle(tree.focus()))
+
+        def set_all_voices(on):
+            item = tree.focus()
+            kind = rows.get(item)
+            if not kind:
+                note.config(text="Select an engine or one of its voices first.")
+                return
+            name = kind[1]
+            disabled_voices[name] = set() if on else {v for v, _ in voice_lists.get(name, [])[1:]}
+            if not on:
+                note.config(text=f"All {name} voices off except the first (one has to stay on).")
+            redraw(name)
+            changed()
+
+        ttk.Button(buttons, text="All voices on", command=lambda: set_all_voices(True)).pack(side=tk.LEFT)
+        ttk.Button(buttons, text="All voices off", command=lambda: set_all_voices(False)).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(buttons, text="Close", style="Accent.TButton", command=dialog.destroy, width=8).pack(side=tk.RIGHT)
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
 
     version_label = ttk.Label(content, text=f"Version {__version__}", style="Muted.TLabel")
     version_label.pack(pady=(12, 0))
