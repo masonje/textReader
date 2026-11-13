@@ -1,5 +1,5 @@
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # Dependency check
 import sys
@@ -53,7 +53,8 @@ from tkinter import ttk
 from tkinter import messagebox
 import tkinter.font as tkfont
 from tts_engines import get_engine, list_engines
-from tts_engines.base import SynthesisCancelled
+from tts_engines.base import SynthesisCancelled, run_cancellable
+import word_timing
 
 # Initialize pygame mixer for audio playback
 pygame.mixer.init()
@@ -165,6 +166,8 @@ def default_settings():
         "tts_engine": "gTTS",
         "hotkeys": DEFAULT_HOTKEYS.copy(),
         "theme": "auto",
+        "view_mode": "compact",
+        "full_window_size": "",
     }
 
 def normalize_loaded_hotkeys(raw_hotkeys):
@@ -191,7 +194,7 @@ def load_settings():
 def save_settings():
     try:
         with open(SETTINGS_FILE, "w") as f:
-            json.dump({"debug_mode": debug_mode, "playback_speed": playback_speed, "tts_engine": tts_engine, "hotkeys": hotkeys, "theme": ui_theme}, f, indent=2)
+            json.dump({"debug_mode": debug_mode, "playback_speed": playback_speed, "tts_engine": tts_engine, "hotkeys": hotkeys, "theme": ui_theme, "view_mode": view_mode, "full_window_size": full_window_size}, f, indent=2)
     except Exception:
         pass
 
@@ -211,6 +214,21 @@ playback_speed = settings.get("playback_speed", 1.0)
 tts_engine = settings.get("tts_engine", "gTTS")
 hotkeys = settings.get("hotkeys", DEFAULT_HOTKEYS.copy())
 ui_theme = settings.get("theme", "auto")  # "auto" follows the desktop, or "dark" / "light"
+view_mode = settings.get("view_mode", "compact")  # "compact" (controls only) or "full"
+full_window_size = settings.get("full_window_size", "")  # "WxH" remembered for full mode
+
+# What is being read aloud, for the full view. reading_serial changes whenever
+# the text changes so the UI knows to reload it.
+reading_text = ""
+reading_spans = []      # (start, end) character offsets per word
+reading_timeline = []   # estimated start time (s) per word
+reading_serial = 0
+reading_lock = threading.Lock()
+
+# Bumped by Stop; a playback thread that sees a newer generation gives up
+# instead of starting audio after the user already pressed Stop.
+playback_generation = 0
+audio_preparing = False  # True while audio is being converted for playback
 playback_start_time = None
 playback_pause_start = None
 playback_pause_accum = 0.0
@@ -301,7 +319,15 @@ def key_name_for(key):
         if key == getattr(keyboard.Key, key_attr, None):
             return key_name
     if hasattr(key, 'char') and key.char:
-        return key.char.lower()
+        char = key.char
+        # With Ctrl held, X reports control characters (Ctrl+Z -> "\x1a"); use the key itself
+        if len(char) == 1 and ord(char) < 32:
+            vk = getattr(key, 'vk', None)
+            if vk and 32 < vk < 127:
+                return chr(vk).lower()
+            if 1 <= ord(char) <= 26:
+                return chr(ord(char) + 96)
+        return char.lower()
     if hasattr(key, 'name') and key.name:
         return normalize_hotkey_part(key.name)
     return None
@@ -385,44 +411,100 @@ def get_audio_duration(file_path):
     except Exception:
         return 0.0
 
+def set_reading_text(text):
+    """Record the text that is about to be read aloud (any thread)."""
+    global reading_text, reading_spans, reading_timeline, reading_serial
+    with reading_lock:
+        reading_text = text
+        reading_spans = word_timing.tokenize(text)
+        reading_timeline = []
+        reading_serial += 1
+
+def update_reading_timeline(audio_path, duration):
+    """Estimate when each word is spoken in `audio_path` (call from a worker thread)."""
+    global reading_timeline
+    with reading_lock:
+        text, spans, serial = reading_text, reading_spans, reading_serial
+    if not spans or duration <= 0:
+        return
+    # A quick even spread first, so highlighting starts at once...
+    rough = word_timing.build_timeline(text, duration, [], spans)
+    with reading_lock:
+        if serial == reading_serial:
+            reading_timeline = rough
+    # ...then refine it using the pauses actually found in the audio
+    refined = word_timing.build_timeline(text, duration, word_timing.detect_silences(audio_path), spans)
+    with reading_lock:
+        if serial == reading_serial:
+            reading_timeline = refined
+    if debug_mode:
+        print(f"🐛 [DEBUG] Word timeline ready: {len(refined)} words over {duration:.1f}s")
+
+def playback_position():
+    """Seconds of audio played so far, or None when nothing is loaded."""
+    if playback_start_time is None:
+        return None
+    now = playback_pause_start if (is_paused and playback_pause_start is not None) else time.monotonic()
+    return max(0.0, now - playback_start_time - playback_pause_accum)
+
 def play_audio():
     """Play the generated audio file at the selected speed"""
-    global playback_start_time, playback_pause_start, playback_pause_accum, current_audio_duration
+    global playback_start_time, playback_pause_start, playback_pause_accum, current_audio_duration, audio_preparing
+    generation = playback_generation
+    stopped = lambda: generation != playback_generation or not is_running
+    audio_preparing = True
     try:
         # Choose file based on engine
         file_to_play = get_output_path(tts_engine)
         if not wait_for_audio_file(file_to_play, 20):
             print("⚠️ Audio file not ready for playback")
             return
-        pygame.mixer.music.load(file_to_play)
         # Adjust speed for MP3 only
         if playback_speed != 1.0 and tts_engine == "gTTS":
-            import subprocess
             temp_speed_file = str(SETTINGS_DIR / "clipboard_speech_speed.mp3")
-            subprocess.run([
-                "ffmpeg", "-y", "-i", audio_file_mp3,
-                "-filter:a", f"atempo={playback_speed}", temp_speed_file
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            pygame.mixer.music.load(temp_speed_file)
-            file_to_play = temp_speed_file
+            try:
+                run_cancellable(
+                    ["ffmpeg", "-y", "-loglevel", "error", "-i", file_to_play,
+                     "-filter:a", f"atempo={playback_speed}", temp_speed_file],
+                    cancel_check=stopped,
+                )
+                file_to_play = temp_speed_file
+            except SynthesisCancelled:
+                return
+            except Exception as e:
+                print(f"⚠️ Speed change failed, playing at normal speed: {e}")
+        if stopped():
+            return  # Stop was pressed while the audio was being prepared
+        pygame.mixer.music.load(file_to_play)
+        current_audio_duration = get_audio_duration(file_to_play)
+        if stopped():
+            return
         playback_start_time = time.monotonic()
         playback_pause_start = None
         playback_pause_accum = 0.0
-        current_audio_duration = get_audio_duration(file_to_play)
         pygame.mixer.music.play()
-        while pygame.mixer.music.get_busy() and is_running and not is_paused:
+        audio_preparing = False
+        update_reading_timeline(file_to_play, current_audio_duration)
+        while pygame.mixer.music.get_busy() and is_running and not is_paused and not stopped():
             time.sleep(0.1)
     except Exception as e:
         print(f"Error playing audio: {e}")
+    finally:
+        if generation == playback_generation:
+            audio_preparing = False
 
 def on_play():
     """Resume/play reading"""
-    global is_paused
-    
-    if is_paused and pygame.mixer.music.get_busy():
+    global is_paused, playback_pause_start, playback_pause_accum
+
+    if is_paused and playback_start_time is not None:
         # Resume paused playback from where it left off
+        # (pygame reports get_busy() == False while paused, so check our own state)
         pygame.mixer.music.unpause()
         is_paused = False
+        if playback_pause_start is not None:
+            playback_pause_accum += time.monotonic() - playback_pause_start
+            playback_pause_start = None
         print("▶ Resumed from pause")
     else:
         # Start fresh playback from beginning, honoring speed
@@ -461,6 +543,9 @@ def on_pause():
 def on_stop():
     """Stop and reset playback"""
     global is_paused, playback_start_time, playback_pause_start, playback_pause_accum, current_audio_duration, current_progress
+    global playback_generation, audio_preparing
+    playback_generation += 1
+    audio_preparing = False
     is_paused = False
     playback_start_time = None
     playback_pause_start = None
@@ -573,6 +658,7 @@ def start_build(text):
             close_dialog()
             try:
                 os.replace(temp_path, final_path)
+                set_reading_text(text)
             except Exception as e:
                 print(f"Error saving audio: {e}")
                 remove_temp()
@@ -787,6 +873,14 @@ def apply_theme(root):
     style.configure("Horizontal.TScale", background=p["button"], troughcolor=p["field"],
                     bordercolor=p["border"], lightcolor=p["button"], darkcolor=p["button"])
     style.map("Horizontal.TScale", background=[("disabled", p["surface"]), ("active", p["hover"])])
+    style.configure("Vertical.TScrollbar", background=p["button"], troughcolor=p["field"],
+                    bordercolor=p["field"], lightcolor=p["button"], darkcolor=p["button"],
+                    arrowcolor=p["fg"], gripcount=0)
+    style.map("Vertical.TScrollbar", background=[("active", p["hover"])],
+              lightcolor=[("active", p["hover"])], darkcolor=[("active", p["hover"])])
+    style.configure("TSeparator", background=p["border"])
+    _theme_fonts["reading"] = reading = default_font.copy()
+    reading.configure(size=13)
     style.configure("Horizontal.TProgressbar", background=p["accent"], troughcolor=p["field"],
                     bordercolor=p["border"], lightcolor=p["accent"], darkcolor=p["accent"], thickness=8)
 
@@ -814,7 +908,7 @@ def themed_toplevel(parent, title):
 def create_control_window():
     global control_window, playback_speed, hotkeys
     window = tk.Tk(className="reader")
-    window.title(f"Clipboard Reader v{__version__}")
+    window.title("Clipboard Reader")
     window.resizable(False, False)
     apply_theme(window)
 
@@ -833,7 +927,7 @@ def create_control_window():
             pass
 
     content = ttk.Frame(window, padding=(16, 14, 16, 8))
-    content.pack(fill=tk.BOTH, expand=True)
+    content.pack(side=tk.LEFT, fill=tk.Y)
 
     # Settings form: label column + control column, aligned
     form = ttk.Frame(content)
@@ -871,17 +965,7 @@ def create_control_window():
             engine_missing_deps = False
     engine_dropdown.bind("<<ComboboxSelected>>", on_engine_select)
 
-    ttk.Label(form, text="Debug").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=3)
-    debug_var = tk.StringVar(value="ON" if debug_mode else "OFF")
-    debug_dropdown = ttk.Combobox(form, textvariable=debug_var, values=["ON", "OFF"], state="readonly", width=14)
-    debug_dropdown.grid(row=1, column=1, columnspan=2, sticky="ew", pady=3)
-    def on_debug_select(event=None):
-        global debug_mode
-        debug_mode = (debug_var.get() == "ON")
-        save_settings()
-    debug_dropdown.bind("<<ComboboxSelected>>", on_debug_select)
-
-    ttk.Label(form, text="Speed").grid(row=2, column=0, sticky="w", padx=(0, 10), pady=3)
+    ttk.Label(form, text="Speed").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=3)
     speed_var = tk.DoubleVar(value=playback_speed)
     def on_speed_change(val):
         global playback_speed
@@ -892,9 +976,9 @@ def create_control_window():
         save_settings()
         slider_value_label.config(text=f"{playback_speed:.1f}x")
     speed_slider = ttk.Scale(form, from_=0.5, to=2.0, orient=tk.HORIZONTAL, variable=speed_var, command=on_speed_change, length=130)
-    speed_slider.grid(row=2, column=1, sticky="ew", pady=3)
+    speed_slider.grid(row=1, column=1, sticky="ew", pady=3)
     slider_value_label = ttk.Label(form, text=f"{playback_speed:.1f}x", width=4, anchor="e")
-    slider_value_label.grid(row=2, column=2, sticky="e", padx=(8, 0), pady=3)
+    slider_value_label.grid(row=1, column=2, sticky="e", padx=(8, 0), pady=3)
 
     # Set window/taskbar icon
     try:
@@ -912,8 +996,32 @@ def create_control_window():
     ttk.Separator(content).pack(fill=tk.X, pady=(12, 10))
 
     # Status and playback progress
-    status_label = ttk.Label(content, text="Running", style="Header.TLabel")
-    status_label.pack(anchor="w")
+    status_row = ttk.Frame(content)
+    status_row.pack(fill=tk.X)
+    status_label = ttk.Label(status_row, text="Running", style="Header.TLabel")
+    status_label.pack(side=tk.LEFT)
+    time_label = ttk.Label(status_row, text="", style="Muted.TLabel")
+    time_label.pack(side=tk.RIGHT)
+
+    def format_time(seconds):
+        seconds = int(max(0, seconds))
+        h, rem = divmod(seconds, 3600)
+        m, sec = divmod(rem, 60)
+        return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+    def update_time_label():
+        try:
+            if not window.winfo_exists():
+                return
+        except Exception:
+            return
+        position = playback_position()
+        if position is not None and (pygame.mixer.music.get_busy() or is_paused) and current_audio_duration > 0:
+            position = min(position, current_audio_duration)
+            time_label.config(text=f"{format_time(position)} / {format_time(current_audio_duration)}")
+        else:
+            time_label.config(text="")
+        window.after(250, update_time_label)
     progress_var = tk.DoubleVar(value=0.0)
     progress_bar = ttk.Progressbar(content, orient=tk.HORIZONTAL, mode="determinate", maximum=100, variable=progress_var)
     progress_bar.pack(fill=tk.X, pady=(6, 12))
@@ -997,14 +1105,158 @@ def create_control_window():
         dialog.bind("<Escape>", lambda _e: dialog.destroy())
 
     shortcuts_btn = ttk.Button(button_frame, text="Shortcuts…", command=open_shortcut_preferences)
-    shortcuts_btn.grid(row=3, column=0, columnspan=2, pady=(3, 0), sticky="ew")
+    shortcuts_btn.grid(row=3, column=0, padx=(0, 4), pady=(3, 0), sticky="ew")
+    mode_btn = ttk.Button(button_frame, text="Full View ▸")
+    mode_btn.grid(row=3, column=1, padx=(4, 0), pady=(3, 0), sticky="ew")
+
+    # Options area: bottom of the left column, shown only in the full view.
+    # Add future settings as more rows in options_form.
+    options_frame = ttk.Frame(content)
+    ttk.Separator(options_frame).pack(fill=tk.X, pady=(0, 10))
+    options_form = ttk.Frame(options_frame)
+    options_form.pack(fill=tk.X)
+    options_form.columnconfigure(1, weight=1)
+    ttk.Label(options_form, text="Debug").grid(row=0, column=0, sticky="w", padx=(0, 10), pady=3)
+    debug_var = tk.StringVar(value="ON" if debug_mode else "OFF")
+    debug_dropdown = ttk.Combobox(options_form, textvariable=debug_var, values=["ON", "OFF"], state="readonly", width=14)
+    debug_dropdown.grid(row=0, column=1, sticky="ew", pady=3)
+    def on_debug_select(event=None):
+        global debug_mode
+        debug_mode = (debug_var.get() == "ON")
+        save_settings()
+    debug_dropdown.bind("<<ComboboxSelected>>", on_debug_select)
 
     version_label = ttk.Label(content, text=f"Version {__version__}", style="Muted.TLabel")
     version_label.pack(pady=(12, 0))
 
-    # Wide enough that the title bar shows the full name and version
-    window.update_idletasks()
-    window.minsize(max(window.winfo_reqwidth(), 320), window.winfo_reqheight())
+    # ---- Full view: the text being read, with the current word highlighted
+    p = PALETTE
+    divider = ttk.Separator(window, orient=tk.VERTICAL)
+    reading_panel = ttk.Frame(window, padding=(14, 14, 16, 12))
+    reading_header = ttk.Frame(reading_panel)
+    reading_header.pack(fill=tk.X, pady=(0, 8))
+    ttk.Label(reading_header, text="Now Reading", style="Header.TLabel").pack(side=tk.LEFT)
+    word_count_label = ttk.Label(reading_header, text="", style="Muted.TLabel")
+    word_count_label.pack(side=tk.RIGHT)
+    text_frame = ttk.Frame(reading_panel)
+    text_frame.pack(fill=tk.BOTH, expand=True)
+    reading_view = tk.Text(
+        text_frame, wrap=tk.WORD, font=_theme_fonts["reading"], relief=tk.FLAT, borderwidth=0,
+        background=p["field"], foreground=p["fg"], insertbackground=p["fg"],
+        selectbackground=p["accent"], selectforeground=p["accent_fg"],
+        highlightthickness=1, highlightbackground=p["border"], highlightcolor=p["border"],
+        padx=14, pady=12, spacing1=2, spacing2=4, spacing3=6, cursor="arrow",
+        width=46, height=14,
+    )
+    reading_scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=reading_view.yview)
+    reading_view.configure(yscrollcommand=reading_scroll.set)
+    reading_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    reading_view.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    reading_view.tag_configure("placeholder", foreground=p["muted"])
+    reading_view.tag_configure("spoken", foreground=p["muted"])
+    reading_view.tag_configure("current", background=p["accent"], foreground=p["accent_fg"])
+    reading_view.configure(state=tk.DISABLED)
+
+    view_state = {"serial": None, "word": None}
+
+    def show_reading_text():
+        with reading_lock:
+            text, serial, count = reading_text, reading_serial, len(reading_spans)
+        reading_view.configure(state=tk.NORMAL)
+        reading_view.delete("1.0", tk.END)
+        if text:
+            reading_view.insert("1.0", text)
+        else:
+            reading_view.insert("1.0", "Text appears here while it's read aloud, "
+                                       "with the current word highlighted.", "placeholder")
+        reading_view.configure(state=tk.DISABLED)
+        reading_view.yview_moveto(0)
+        word_count_label.config(text=f"{count} words" if count else "")
+        view_state["serial"] = serial
+        view_state["word"] = None
+
+    def highlight_word(index):
+        """Highlight word `index` (-1 for none) and dim the words already spoken."""
+        if index == view_state["word"]:
+            return
+        view_state["word"] = index
+        reading_view.tag_remove("current", "1.0", tk.END)
+        reading_view.tag_remove("spoken", "1.0", tk.END)
+        with reading_lock:
+            spans = reading_spans
+        if 0 <= index < len(spans):
+            start, end = spans[index]
+            reading_view.tag_add("spoken", "1.0", f"1.0+{start}c")
+            reading_view.tag_add("current", f"1.0+{start}c", f"1.0+{end}c")
+            reading_view.see(f"1.0+{end}c")
+            word_count_label.config(text=f"Word {index + 1} of {len(spans)}")
+        elif spans:
+            word_count_label.config(text=f"{len(spans)} words")
+
+    def update_reading_view():
+        try:
+            if not window.winfo_exists():
+                return
+        except Exception:
+            return
+        if view_mode == "full":
+            if view_state["serial"] != reading_serial:
+                show_reading_text()
+            position = playback_position()
+            playing = pygame.mixer.music.get_busy() or is_paused
+            with reading_lock:
+                timeline = reading_timeline
+            if playing and position is not None and timeline:
+                highlight_word(max(0, word_timing.word_at(timeline, position)))
+            elif not playing:
+                highlight_word(-1)
+        window.after(80, update_reading_view)
+
+    def compact_size():
+        content.update_idletasks()
+        return max(content.winfo_reqwidth(), 320), content.winfo_reqheight()
+
+    def apply_view_mode(remember_size=True):
+        global full_window_size
+        # Compact shows the version footer; full shows the options area instead
+        if view_mode == "full":
+            version_label.pack_forget()
+            options_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(12, 0))
+        else:
+            options_frame.pack_forget()
+            version_label.pack(pady=(12, 0))
+        width, height = compact_size()
+        if view_mode == "full":
+            # Controls keep their natural width; the reading panel takes the rest
+            content.pack_configure(fill=tk.Y, expand=False)
+            divider.pack(side=tk.LEFT, fill=tk.Y)
+            reading_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            window.resizable(True, True)
+            window.minsize(width + 320, height)
+            window.geometry(full_window_size or f"{width + 520}x{max(height, 460)}")
+            mode_btn.config(text="◂ Compact")
+            show_reading_text()
+        else:
+            if remember_size and window.winfo_ismapped() and reading_panel.winfo_ismapped():
+                full_window_size = f"{window.winfo_width()}x{window.winfo_height()}"
+            reading_panel.pack_forget()
+            divider.pack_forget()
+            # Controls stretch across the whole window so the margins are even
+            content.pack_configure(fill=tk.BOTH, expand=True)
+            window.minsize(width, height)
+            window.geometry(f"{width}x{height}")
+            window.resizable(False, False)
+            mode_btn.config(text="Full View ▸")
+
+    def toggle_view_mode():
+        global view_mode
+        view_mode = "compact" if view_mode == "full" else "full"
+        apply_view_mode()
+        save_settings()
+
+    mode_btn.config(command=toggle_view_mode)
+    apply_view_mode(remember_size=False)
+    update_reading_view()
 
     def set_controls_state(disabled: bool):
         try:
@@ -1054,7 +1306,12 @@ def create_control_window():
             status_label.config(text="Missing dependencies")
             window.after(500, update_status)
             return
-        if pygame.mixer.music.get_busy() or is_paused:
+        busy_preparing = current_build is not None or audio_preparing
+        if busy_preparing and not pygame.mixer.music.get_busy() and not is_paused:
+            status_label.config(text="Building audio…" if current_build is not None else "Preparing audio…")
+            speed_slider.state(["disabled"])
+            progress_var.set(0.0)
+        elif pygame.mixer.music.get_busy() or is_paused:
             if is_paused:
                 status_label.config(text="Paused")
             else:
@@ -1081,15 +1338,23 @@ def create_control_window():
             stop_btn.state(["!disabled"])
         else:
             pause_btn.state(["disabled"])
-            stop_btn.state(["disabled"])
+            # Stop stays available while audio is being built or prepared, so it can always be cancelled
+            stop_btn.state(["!disabled"] if busy_preparing else ["disabled"])
         try:
             window.after(500, update_status)
         except Exception:
             pass
     update_status()
+    update_time_label()
     def on_close():
-        global is_running
+        global is_running, full_window_size
         is_running = False
+        try:
+            if view_mode == "full":
+                full_window_size = f"{window.winfo_width()}x{window.winfo_height()}"
+                save_settings()
+        except Exception:
+            pass
         try:
             if tray_icon:
                 tray_icon.stop()
@@ -1136,10 +1401,13 @@ def on_press(key):
             combo = parse_hotkey(hotkeys.get(action, DEFAULT_HOTKEYS[action]))
             if combo and combo.issubset(pressed_keys) and action not in active_hotkeys:
                 active_hotkeys.add(action)
+                if debug_mode:
+                    print(f"🐛 [DEBUG] Hotkey: {action} (keys held: {sorted(pressed_keys)})")
                 trigger_hotkey(action)
                 break
-    except AttributeError:
-        pass
+    except Exception as e:
+        # An exception here would stop the pynput listener and kill every hotkey
+        print(f"Hotkey error: {e}")
 
 def on_release(key):
     """Handle keyboard release events"""
@@ -1156,8 +1424,8 @@ def on_release(key):
             combo = parse_hotkey(hotkeys.get(action, DEFAULT_HOTKEYS[action]))
             if not combo or not combo.issubset(pressed_keys):
                 active_hotkeys.discard(action)
-    except AttributeError:
-        pass
+    except Exception as e:
+        print(f"Hotkey error: {e}")
 
 def setup_hotkeys():
     """Setup keyboard listener for control"""
@@ -1167,14 +1435,22 @@ def setup_hotkeys():
 
 def clipboard_monitor():
     """Monitor clipboard and speak new content"""
-    global is_running, is_paused
-    
+    global is_running, is_paused, listener
+
     while is_running:
         try:
             # Short pause to prevent high CPU usage
             time.sleep(0.5)
+            # If the keyboard listener ever dies, start a new one so hotkeys keep working
+            if is_running and listener is not None and not listener.is_alive():
+                print("⚠️ Hotkey listener stopped; restarting it")
+                pressed_keys.clear()
+                active_hotkeys.clear()
+                listener = setup_hotkeys()
         except KeyboardInterrupt:
             break
+        except Exception as e:
+            print(f"Error: {e}")
 
 def run_tray():
     """Run the system tray icon (display only, no menu)"""
@@ -1192,6 +1468,8 @@ def run_tray():
 
 # Remove any leftover audio files from previous runs
 cleanup_audio_files()
+
+listener = None
 
 # Start clipboard monitoring in background thread
 monitor_thread = threading.Thread(target=clipboard_monitor, daemon=True)
