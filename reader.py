@@ -965,17 +965,7 @@ def create_control_window():
             engine_missing_deps = False
     engine_dropdown.bind("<<ComboboxSelected>>", on_engine_select)
 
-    ttk.Label(form, text="Debug").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=3)
-    debug_var = tk.StringVar(value="ON" if debug_mode else "OFF")
-    debug_dropdown = ttk.Combobox(form, textvariable=debug_var, values=["ON", "OFF"], state="readonly", width=14)
-    debug_dropdown.grid(row=1, column=1, columnspan=2, sticky="ew", pady=3)
-    def on_debug_select(event=None):
-        global debug_mode
-        debug_mode = (debug_var.get() == "ON")
-        save_settings()
-    debug_dropdown.bind("<<ComboboxSelected>>", on_debug_select)
-
-    ttk.Label(form, text="Speed").grid(row=2, column=0, sticky="w", padx=(0, 10), pady=3)
+    ttk.Label(form, text="Speed").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=3)
     speed_var = tk.DoubleVar(value=playback_speed)
     def on_speed_change(val):
         global playback_speed
@@ -986,9 +976,9 @@ def create_control_window():
         save_settings()
         slider_value_label.config(text=f"{playback_speed:.1f}x")
     speed_slider = ttk.Scale(form, from_=0.5, to=2.0, orient=tk.HORIZONTAL, variable=speed_var, command=on_speed_change, length=130)
-    speed_slider.grid(row=2, column=1, sticky="ew", pady=3)
+    speed_slider.grid(row=1, column=1, sticky="ew", pady=3)
     slider_value_label = ttk.Label(form, text=f"{playback_speed:.1f}x", width=4, anchor="e")
-    slider_value_label.grid(row=2, column=2, sticky="e", padx=(8, 0), pady=3)
+    slider_value_label.grid(row=1, column=2, sticky="e", padx=(8, 0), pady=3)
 
     # Set window/taskbar icon
     try:
@@ -1131,6 +1121,19 @@ def create_control_window():
     ttk.Label(reading_header, text="Now Reading", style="Header.TLabel").pack(side=tk.LEFT)
     word_count_label = ttk.Label(reading_header, text="", style="Muted.TLabel")
     word_count_label.pack(side=tk.RIGHT)
+    # Footer (full view only): Debug setting
+    reading_footer = ttk.Frame(reading_panel)
+    reading_footer.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
+    ttk.Label(reading_footer, text="Debug").pack(side=tk.LEFT, padx=(0, 8))
+    debug_var = tk.StringVar(value="ON" if debug_mode else "OFF")
+    debug_dropdown = ttk.Combobox(reading_footer, textvariable=debug_var, values=["ON", "OFF"], state="readonly", width=6)
+    debug_dropdown.pack(side=tk.LEFT)
+    def on_debug_select(event=None):
+        global debug_mode
+        debug_mode = (debug_var.get() == "ON")
+        save_settings()
+    debug_dropdown.bind("<<ComboboxSelected>>", on_debug_select)
+
     text_frame = ttk.Frame(reading_panel)
     text_frame.pack(fill=tk.BOTH, expand=True)
     reading_view = tk.Text(
