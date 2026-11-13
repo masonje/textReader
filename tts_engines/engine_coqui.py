@@ -27,7 +27,7 @@ class CoquiEngine(TTSEngine):
         try:
             import TTS  # noqa: F401
         except Exception:
-            missing.append("coqui-tts")
+            missing.append("coqui-tts (optional, large: pip install coqui-tts — installs PyTorch)")
         return missing
 
     def synthesize(
@@ -35,6 +35,7 @@ class CoquiEngine(TTSEngine):
         text: str,
         output_path: str,
         cancel_event: Optional[threading.Event] = None,
+        voice: Optional[str] = None,
     ) -> None:
         # Can't be interrupted mid-run; on cancel the caller discards the output.
         engine = _get_engine()

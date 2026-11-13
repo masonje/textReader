@@ -33,7 +33,10 @@ pyinstaller \
     --add-data "pireader.png:." \
     --hidden-import=gtts \
     --hidden-import=pyttsx3 \
-    --hidden-import=coqui_tts \
+    --collect-submodules pyttsx3 \
+    --hidden-import=edge_tts \
+    --collect-all piper \
+    --hidden-import=onnxruntime \
     reader.py
 
 echo "✅ Build complete!"

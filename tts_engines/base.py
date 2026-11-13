@@ -3,11 +3,20 @@ from __future__ import annotations
 import subprocess
 import threading
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Sequence
+from pathlib import Path
+from typing import Callable, List, Optional, Sequence, Tuple
 
 
 class SynthesisCancelled(Exception):
     """Raised by an engine when synthesis was stopped by a cancel request."""
+
+
+# A voice is (voice_id, label). voice_id is what the engine understands;
+# label is what the UI shows.
+Voice = Tuple[str, str]
+
+# Where engines may keep downloaded voice data
+DATA_DIR = Path.home() / ".textReader"
 
 
 @dataclass
@@ -18,14 +27,23 @@ class TTSEngine:
     def check_dependencies(self) -> List[str]:
         return []
 
+    def list_voices(self) -> List[Voice]:
+        """Voices this engine offers, best default first. May be slow (runs off the UI thread).
+
+        Return an empty list if the engine has no voice choice.
+        """
+        return []
+
     def synthesize(
         self,
         text: str,
         output_path: str,
         cancel_event: Optional[threading.Event] = None,
+        voice: Optional[str] = None,
     ) -> None:
         """Write speech for `text` to `output_path`.
 
+        `voice` is a voice_id from list_voices(), or None for the engine default.
         Engines should check `cancel_event` where they can and raise
         SynthesisCancelled when it is set. Engines that cannot be interrupted
         may ignore it; the caller discards their output.

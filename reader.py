@@ -1,5 +1,5 @@
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 # Dependency check
 import sys
@@ -54,6 +54,27 @@ from tkinter import messagebox
 import tkinter.font as tkfont
 from tts_engines import get_engine, list_engines
 from tts_engines.base import SynthesisCancelled, run_cancellable
+
+if "--check-engines" in sys.argv[1:]:
+    # Diagnostics: report each engine's dependencies and try a short phrase with its default voice
+    import tempfile
+    for name in sorted(list_engines(), key=str.lower):
+        engine = get_engine(name)
+        missing = engine.check_dependencies()
+        if missing:
+            print(f"{name:10} not available: {', '.join(missing)}")
+            continue
+        try:
+            voices = engine.list_voices()
+            voice = next((v for v, label in voices if "download" not in label), voices[0][0] if voices else None)
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "test." + engine.output_ext)
+                engine.synthesize("Testing one two three.", path, threading.Event(), voice=voice)
+                size = os.path.getsize(path) if os.path.exists(path) else 0
+            print(f"{name:10} {'OK' if size else 'NO AUDIO'}: {len(voices)} voices, tested {voice or 'default'}")
+        except Exception as e:
+            print(f"{name:10} ERROR: {e}")
+    sys.exit(0)
 import word_timing
 
 # Initialize pygame mixer for audio playback
@@ -168,6 +189,7 @@ def default_settings():
         "theme": "auto",
         "view_mode": "compact",
         "full_window_size": "",
+        "voices": {},
     }
 
 def normalize_loaded_hotkeys(raw_hotkeys):
@@ -194,7 +216,7 @@ def load_settings():
 def save_settings():
     try:
         with open(SETTINGS_FILE, "w") as f:
-            json.dump({"debug_mode": debug_mode, "playback_speed": playback_speed, "tts_engine": tts_engine, "hotkeys": hotkeys, "theme": ui_theme, "view_mode": view_mode, "full_window_size": full_window_size}, f, indent=2)
+            json.dump({"debug_mode": debug_mode, "playback_speed": playback_speed, "tts_engine": tts_engine, "hotkeys": hotkeys, "theme": ui_theme, "view_mode": view_mode, "full_window_size": full_window_size, "voices": engine_voices}, f, indent=2)
     except Exception:
         pass
 
@@ -216,6 +238,9 @@ hotkeys = settings.get("hotkeys", DEFAULT_HOTKEYS.copy())
 ui_theme = settings.get("theme", "auto")  # "auto" follows the desktop, or "dark" / "light"
 view_mode = settings.get("view_mode", "compact")  # "compact" (controls only) or "full"
 full_window_size = settings.get("full_window_size", "")  # "WxH" remembered for full mode
+engine_voices = settings.get("voices", {})  # engine name -> chosen voice id
+if not isinstance(engine_voices, dict):
+    engine_voices = {}
 
 # What is being read aloud, for the full view. reading_serial changes whenever
 # the text changes so the UI knows to reload it.
@@ -238,6 +263,7 @@ taskbar_icon_photo = None
 engine_missing_deps = False
 tray_icon = None
 current_build = None      # cancel Event for the audio build in progress, if any
+voices_changed_callback = None  # set by the UI: refresh the voice list for an engine
 build_counter = 0
 # Tk is only safe to touch from the main thread; other threads queue calls here.
 main_thread_calls = queue.Queue()
@@ -275,9 +301,8 @@ def cleanup_audio_files():
             os.remove(audio_file_mp3)
         if os.path.exists(audio_file_wav):
             os.remove(audio_file_wav)
-        temp_speed_file = str(SETTINGS_DIR / "clipboard_speech_speed.mp3")
-        if os.path.exists(temp_speed_file):
-            os.remove(temp_speed_file)
+        for speed_file in SETTINGS_DIR.glob("clipboard_speech_speed.*"):
+            speed_file.unlink(missing_ok=True)
         # Partial files from builds that were cancelled or interrupted
         for leftover in SETTINGS_DIR.glob("clipboard_speech.building*"):
             leftover.unlink(missing_ok=True)
@@ -460,8 +485,8 @@ def play_audio():
             print("⚠️ Audio file not ready for playback")
             return
         # Adjust speed for MP3 only
-        if playback_speed != 1.0 and tts_engine == "gTTS":
-            temp_speed_file = str(SETTINGS_DIR / "clipboard_speech_speed.mp3")
+        if playback_speed != 1.0:
+            temp_speed_file = str(SETTINGS_DIR / ("clipboard_speech_speed" + os.path.splitext(file_to_play)[1]))
             try:
                 run_cancellable(
                     ["ffmpeg", "-y", "-loglevel", "error", "-i", file_to_play,
@@ -579,6 +604,7 @@ def start_build(text):
     current_build = cancel_event
     build_counter += 1
     engine_name = tts_engine
+    voice = engine_voices.get(engine_name)
     final_path = get_output_path(engine_name)
     root, ext = os.path.splitext(final_path)
     # Build into a private file so a cancelled or stale build never clobbers the real one.
@@ -602,7 +628,7 @@ def start_build(text):
             if missing_deps:
                 results.put(("error", f"Missing: {', '.join(missing_deps)}"))
                 return
-            engine.synthesize(text, temp_path, cancel_event)
+            engine.synthesize(text, temp_path, cancel_event, voice=voice)
             if cancel_event.is_set():
                 raise SynthesisCancelled()
             if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
@@ -664,6 +690,8 @@ def start_build(text):
                 remove_temp()
                 return
             threading.Thread(target=play_audio, daemon=True).start()
+            if voices_changed_callback is not None:
+                voices_changed_callback(engine_name)  # e.g. a Piper voice just finished downloading
             return
         remove_temp()
         if status == "error" and not cancel_event.is_set():
@@ -895,6 +923,32 @@ def apply_theme(root):
     if debug_mode:
         print(f"🐛 [DEBUG] UI theme: {mode} (setting: {ui_theme})")
 
+def widen_popdown(combo):
+    """Let a combobox's drop-down list grow wider than the box so long names aren't cut off.
+
+    Tk always sizes the list to the box's width, so resize it right after it opens.
+    """
+    import re
+
+    def adjust():
+        try:
+            popdown = combo.tk.call("ttk::combobox::PopdownWindow", combo)
+            if str(combo.tk.call("wm", "state", popdown)) == "withdrawn":
+                return
+            font = tkfont.nametofont("TkDefaultFont")
+            needed = max((font.measure(str(v)) for v in combo.cget("values")), default=0) + 44
+            m = re.match(r"(\d+)x(\d+)([+-]-?\d+)([+-]-?\d+)", combo.tk.call("wm", "geometry", popdown))
+            if not m or needed <= int(m.group(1)):
+                return
+            x = min(int(m.group(3)), combo.winfo_screenwidth() - needed)
+            combo.tk.call("wm", "geometry", popdown, f"{needed}x{m.group(2)}+{max(0, x)}{m.group(4)}")
+        except Exception:
+            pass
+
+    # Tk places the list after running postcommand (and processes idle tasks while
+    # doing it), so wait a moment before resizing.
+    combo.configure(postcommand=lambda: combo.after(25, adjust))
+
 def themed_toplevel(parent, title):
     """A dialog window with the app's background and a padded content frame."""
     dialog = tk.Toplevel(parent)
@@ -936,7 +990,7 @@ def create_control_window():
 
     ttk.Label(form, text="Engine").grid(row=0, column=0, sticky="w", padx=(0, 10), pady=3)
     engine_var = tk.StringVar(value=tts_engine)
-    engine_dropdown = ttk.Combobox(form, textvariable=engine_var, values=list_engines(), state="readonly", width=14)
+    engine_dropdown = ttk.Combobox(form, textvariable=engine_var, values=sorted(list_engines(), key=str.lower), state="readonly", width=14)
     engine_dropdown.grid(row=0, column=1, columnspan=2, sticky="ew", pady=3)
     def on_engine_select(event=None):
         global tts_engine, engine_missing_deps
@@ -952,6 +1006,7 @@ def create_control_window():
             pass
         tts_engine = engine_var.get()
         save_settings()
+        load_voices(tts_engine)
         missing_deps = check_engine_dependencies(tts_engine)
         if missing_deps:
             safe_showwarning(
@@ -965,7 +1020,56 @@ def create_control_window():
             engine_missing_deps = False
     engine_dropdown.bind("<<ComboboxSelected>>", on_engine_select)
 
-    ttk.Label(form, text="Speed").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=3)
+    ttk.Label(form, text="Voice").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=3)
+    voice_var = tk.StringVar(value="Loading voices…")
+    voice_dropdown = ttk.Combobox(form, textvariable=voice_var, values=[], state="disabled", width=14)
+    voice_dropdown.grid(row=1, column=1, columnspan=2, sticky="ew", pady=3)
+    widen_popdown(voice_dropdown)
+    voice_choices = {"engine": None, "ids": []}
+
+    def show_voices(engine_name, voices):
+        """Fill the Voice list for engine_name (main thread)."""
+        if engine_name != tts_engine:
+            return  # the user switched engines while this list was loading
+        voice_choices["engine"] = engine_name
+        voice_choices["ids"] = [voice_id for voice_id, _ in voices]
+        if not voices:
+            voice_dropdown.configure(values=["Default"], state="disabled")
+            voice_var.set("Default")
+            return
+        saved = engine_voices.get(engine_name)
+        index = voice_choices["ids"].index(saved) if saved in voice_choices["ids"] else 0
+        engine_voices[engine_name] = voice_choices["ids"][index]
+        voice_dropdown.configure(values=[label for _, label in voices], state="readonly")
+        voice_dropdown.current(index)
+
+    def load_voices(engine_name, show_loading=True):
+        """List the engine's voices in the background (some engines are slow to list)."""
+        if show_loading:
+            voice_dropdown.configure(values=[], state="disabled")
+            voice_var.set("Loading voices…")
+        def worker():
+            engine = get_engine(engine_name)
+            try:
+                voices = engine.list_voices() if engine and not engine.check_dependencies() else []
+            except Exception as e:
+                print(f"Could not list voices for {engine_name}: {e}")
+                voices = []
+            main_thread_calls.put(lambda: show_voices(engine_name, voices))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_voice_select(event=None):
+        index = voice_dropdown.current()
+        if voice_choices["engine"] == tts_engine and 0 <= index < len(voice_choices["ids"]):
+            engine_voices[tts_engine] = voice_choices["ids"][index]
+            save_settings()
+    voice_dropdown.bind("<<ComboboxSelected>>", on_voice_select)
+
+    global voices_changed_callback
+    voices_changed_callback = lambda name: main_thread_calls.put(lambda: load_voices(name, show_loading=False))
+    load_voices(tts_engine)
+
+    ttk.Label(form, text="Speed").grid(row=2, column=0, sticky="w", padx=(0, 10), pady=3)
     speed_var = tk.DoubleVar(value=playback_speed)
     def on_speed_change(val):
         global playback_speed
@@ -976,9 +1080,9 @@ def create_control_window():
         save_settings()
         slider_value_label.config(text=f"{playback_speed:.1f}x")
     speed_slider = ttk.Scale(form, from_=0.5, to=2.0, orient=tk.HORIZONTAL, variable=speed_var, command=on_speed_change, length=130)
-    speed_slider.grid(row=1, column=1, sticky="ew", pady=3)
+    speed_slider.grid(row=2, column=1, sticky="ew", pady=3)
     slider_value_label = ttk.Label(form, text=f"{playback_speed:.1f}x", width=4, anchor="e")
-    slider_value_label.grid(row=1, column=2, sticky="e", padx=(8, 0), pady=3)
+    slider_value_label.grid(row=2, column=2, sticky="e", padx=(8, 0), pady=3)
 
     # Set window/taskbar icon
     try:
@@ -1507,9 +1611,8 @@ if os.path.exists(audio_file_mp3):
     os.remove(audio_file_mp3)
 if os.path.exists(audio_file_wav):
     os.remove(audio_file_wav)
-temp_speed_file = str(SETTINGS_DIR / "clipboard_speech_speed.mp3")
-if os.path.exists(temp_speed_file):
-    os.remove(temp_speed_file)
+for speed_file in SETTINGS_DIR.glob("clipboard_speech_speed.*"):
+    speed_file.unlink(missing_ok=True)
 icon_path = SETTINGS_DIR / "lips_icon.png"
 if os.path.exists(icon_path):
     os.remove(icon_path)
