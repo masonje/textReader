@@ -68,6 +68,7 @@ class EdgeEngine(TTSEngine):
                       "option here, with many accents.")
         self.quality = 5
         self.needs_internet = True
+        self.service = "Microsoft"
 
     def check_dependencies(self) -> List[str]:
         try:

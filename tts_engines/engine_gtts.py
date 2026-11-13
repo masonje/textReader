@@ -24,6 +24,7 @@ class GTTSEngine(TTSEngine):
         self.about = "Google Translate's text-to-speech. A clear, natural female voice; the accent changes with the Google domain."
         self.quality = 3
         self.needs_internet = True
+        self.service = "Google"
 
     def check_dependencies(self) -> List[str]:
         missing: List[str] = []

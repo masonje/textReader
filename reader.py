@@ -279,6 +279,17 @@ def speed_word(rtf):
         return "Slow"
     return "Very slow"
 
+def generated_where(engine, long=False):
+    """Where an engine makes its speech: on this computer, or by an online service."""
+    if engine.needs_internet:
+        who = engine.service or "an online service"
+        if long:
+            return f"Online by {who}. The text you read is sent to {who}'s servers."
+        return f"Online ({who})" if engine.service else "Online"
+    if long:
+        return "Locally, on this computer. Nothing you read is sent anywhere."
+    return "This computer"
+
 def stars(rating):
     rating = max(0, min(5, int(round(rating))))
     return "★" * rating + "☆" * (5 - rating)
@@ -1410,7 +1421,7 @@ def create_control_window():
         dialog, body = themed_toplevel(window, "Engines & Voices")
         dialog.transient(window)
         dialog.resizable(True, True)
-        dialog.minsize(820, 520)
+        dialog.minsize(950, 520)
         ttk.Label(body, text="Click a row's box to turn it on or off; turned-off engines and voices are hidden "
                              "from the drop-downs. Select a row to see its details.", wraplength=780).pack(anchor="w")
 
@@ -1418,12 +1429,14 @@ def create_control_window():
         panes.pack(fill=tk.BOTH, expand=True, pady=(10, 8))
         tree_frame = ttk.Frame(panes)
         tree_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        tree = ttk.Treeview(tree_frame, columns=("speed", "quality"), show="tree headings",
+        tree = ttk.Treeview(tree_frame, columns=("where", "speed", "quality"), show="tree headings",
                             selectmode="browse", height=16)
         tree.heading("#0", text="Engine / voice", anchor="w")
+        tree.heading("where", text="Generated", anchor="w")
         tree.heading("speed", text="Speed", anchor="w")
         tree.heading("quality", text="Quality", anchor="w")
         tree.column("#0", width=300, stretch=True)
+        tree.column("where", width=130, stretch=False)
         tree.column("speed", width=90, stretch=False)
         tree.column("quality", width=96, stretch=False)
         scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
@@ -1481,7 +1494,8 @@ def create_control_window():
             item = engine_items[name]
             rtf, _ = speed_of(name)
             tree.item(item, text=engine_text(name),
-                      values=(speed_word(rtf) if rtf is not None else "—", stars(get_engine(name).quality)),
+                      values=(generated_where(get_engine(name)), speed_word(rtf) if rtf is not None else "—",
+                              stars(get_engine(name).quality)),
                       tags=("engine",) + (("off",) if name in disabled_engines else ()))
             labels = dict(voice_lists.get(name, []))
             for child in tree.get_children(item):
@@ -1490,7 +1504,8 @@ def create_control_window():
                     on = kind[2] not in disabled_voices.get(name, set())
                     rtf, _ = speed_of(name, kind[2])
                     tree.item(child, text=f"{box(on)}  {labels.get(kind[2], kind[2])}",
-                              values=(speed_word(rtf) if rtf is not None else "—", stars(rating_of(name, kind[2]))),
+                              values=(generated_where(get_engine(name)), speed_word(rtf) if rtf is not None else "—",
+                                      stars(rating_of(name, kind[2]))),
                               tags=() if on and name not in disabled_engines else ("off",))
 
         for name in all_names:
@@ -1558,6 +1573,7 @@ def create_control_window():
                 voices = voice_lists.get(name)
                 field(grid, row, "Status", "Not installed" if missing else ("On" if name not in disabled_engines else "Off")); row += 1
                 field(grid, row, "Voices", "loading…" if voices is None else str(len(voices) or 1)); row += 1
+                field(grid, row, "Generated", generated_where(engine, long=True)); row += 1
                 field(grid, row, "Internet", "Needed" if engine.needs_internet else "Not needed (works offline)"); row += 1
                 field(grid, row, "Format", engine.output_ext.upper()); row += 1
                 rtf, runs = speed_of(name)
@@ -1568,7 +1584,10 @@ def create_control_window():
                     info = engine.describe_voice(voice_id)
                 except Exception as e:
                     info = {"Details": f"unavailable ({e})"}
+                field(grid, row, "Generated", generated_where(engine, long=True)); row += 1
                 for key, value in info.items():
+                    if key == "Runs":
+                        continue  # covered by "Generated"
                     field(grid, row, key, value); row += 1
                 rtf, runs = speed_of(name, voice_id)
                 field(grid, row, "Speed", speed_sentence(rtf, runs)); row += 1

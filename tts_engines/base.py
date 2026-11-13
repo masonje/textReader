@@ -38,6 +38,7 @@ class TTSEngine:
     about: str = ""             # one or two sentences about the engine
     quality: int = 3            # default star rating, 1-5 (the user can override it)
     needs_internet: bool = False
+    service: str = ""           # who generates the speech when needs_internet (e.g. "Google")
 
     def describe_voice(self, voice_id: Optional[str]) -> Dict[str, str]:
         """Details about one voice for the UI, as label -> value (in display order)."""
