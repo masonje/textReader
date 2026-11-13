@@ -1,7 +1,7 @@
 # Clipboard Reader
 Reads text aloud. Python version of text aloud mp3 to run on Linux, Windows, or macOS.
 
-**Version:** 1.3.0 — see [Changelog](#changelog) for what changed in each version.
+**Version:** 1.4.0 — see [Changelog](#changelog) for what changed in each version.
 
 ## Requirements
 
@@ -69,14 +69,15 @@ In the Full view, **Engines & Voices…** (bottom left) opens a list of every en
 - **Details:** select an engine or voice to see its details: gender, accent, whether it needs the internet, download size, audio format, the model or service behind it, and for Edge voices Microsoft's personality and "good for" tags.
 - **Speed** is measured, not guessed. Every read (and every Preview) records how long the voice took to build compared with how long the speech is. "About 8 s to build 1 minute of speech" means fast. Builds that include a one-time download or model load are skipped.
 - **Quality** starts at a typical rating for the engine. Click the stars to rate a voice yourself, or **reset** to go back to the default.
-- **▶ Preview** speaks a short sample with the selected voice.
+- **▶ Preview** speaks a short sample with the selected voice. If the voice isn't downloaded yet, a Downloading Voice window shows the progress (with Cancel) and then plays the sample.
+- **Downloaded voices** (Piper) show their size on disk and have a **Download** button with a progress bar and Cancel, or a **Delete download** button that frees the space (the voice downloads again next time it's used). Selecting the engine shows how many voices are downloaded and the total size. Downloads keep going if you close the window.
 - **On/off:** click a row's ☑ box to turn it on or off. Turned-off ones disappear from the Engine and Voice drop-downs. **All voices on** and **All voices off** act on the selected engine. At least one engine, and one voice per engine, always stays on.
 
 These are saved in settings.json as `disabled_engines`, `disabled_voices`, `voice_stats` and `voice_ratings`.
 
 | Engine | Voices | Quality | Needs |
 |---|---|---|---|
-| [Piper](tts_engines/engine_piper.py) | 15 English voices (US, UK, Scottish; male and female) | Natural neural voices, offline | Each voice is ~63 MB, downloaded the first time it's used to `~/.textReader/voices/piper` |
+| [Piper](tts_engines/engine_piper.py) | 15 English voices (US, UK, Scottish; male and female) | Natural neural voices, offline | Each voice is ~63 MB, downloaded the first time it's used (or from Engines & Voices) to `~/.textReader/voices/piper`; downloaded voices can be deleted there |
 | [Edge TTS](tts_engines/engine_edge.py) | ~47 English voices from Microsoft (US, UK, Australia, Canada, India, Ireland, and more) | Very natural neural voices | Internet connection |
 | [gTTS](tts_engines/engine_gtts.py) | 8 English accents (US, UK, Australia, Canada, India, Ireland, South Africa, Nigeria) | Good | Internet connection |
 | [pyttsx3](tts_engines/engine_pyttsx3.py) | The system's speech voices (eSpeak on Linux, SAPI on Windows, NSSpeech on macOS) | Robotic on Linux | — |
@@ -174,6 +175,14 @@ In testing with gTTS, sentence starts landed within about 0.1 s of the real audi
 ## Changelog
 
 The version number is also stored in `__version__` at the top of `reader.py`.
+
+### 1.4.0 — 2026-11-13
+- **Added:** Download progress for voices. When a read needs a voice that isn't downloaded yet, the Building dialog shows "Downloading voice: 21.3 of 63 MB (34%)" with a progress bar before it builds.
+- **Added:** In Engines & Voices, Piper voices have a **Download** button with progress and Cancel, and a **Delete download** button (with confirmation). Each voice shows its size on disk, and the engine shows the total downloaded.
+- **Added:** Preview of a voice that isn't downloaded opens a Downloading Voice window with progress and Cancel, then builds and plays the sample.
+- **Changed:** In the voice details panel, Preview, Download/Delete and the rating now sit at the top so they're never cut off by long detail lists.
+- **Fixed:** Cancelling a Piper download no longer leaves the voice's config file behind.
+- **Engines:** new optional `voice_download_info()`, `download_voice(progress=…)` and `delete_voice()` for engines with downloadable voices.
 
 ### 1.3.0 — 2026-11-13
 - **Added:** Voice choice. A Voice drop-down under Engine lists each engine's voices, and the choice is remembered per engine (`"voices"` in settings.json).

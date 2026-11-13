@@ -51,6 +51,31 @@ class TTSEngine:
         """
         return True
 
+    # --- Optional: voices that are downloaded separately -----------------------
+    def voice_download_info(self, voice_id: Optional[str]) -> Optional[Dict[str, object]]:
+        """For a downloadable voice: {"downloaded": bool, "size_bytes": int}.
+
+        size_bytes is the size on disk when downloaded, otherwise the expected download size.
+        Return None for voices that don't need downloading.
+        """
+        return None
+
+    def download_voice(
+        self,
+        voice_id: Optional[str],
+        progress: Optional[Callable[[int, int], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> None:
+        """Download a voice, calling progress(bytes_done, bytes_total) as it goes.
+
+        Raise SynthesisCancelled if `cancel_event` is set.
+        """
+        raise NotImplementedError()
+
+    def delete_voice(self, voice_id: Optional[str]) -> None:
+        """Remove a downloaded voice from disk (it can be downloaded again later)."""
+        raise NotImplementedError()
+
     # --- Optional: engines the app can install for the user -------------------
     install_note: str = ""  # shown when asking the user whether to install
 
