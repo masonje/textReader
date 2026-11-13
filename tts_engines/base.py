@@ -3,11 +3,20 @@ from __future__ import annotations
 import subprocess
 import threading
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Sequence
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 
 class SynthesisCancelled(Exception):
     """Raised by an engine when synthesis was stopped by a cancel request."""
+
+
+# A voice is (voice_id, label). voice_id is what the engine understands;
+# label is what the UI shows.
+Voice = Tuple[str, str]
+
+# Where engines may keep downloaded voice data
+DATA_DIR = Path.home() / ".textReader"
 
 
 @dataclass
@@ -18,14 +27,54 @@ class TTSEngine:
     def check_dependencies(self) -> List[str]:
         return []
 
+    def list_voices(self) -> List[Voice]:
+        """Voices this engine offers, best default first. May be slow (runs off the UI thread).
+
+        Return an empty list if the engine has no voice choice.
+        """
+        return []
+
+    # --- Optional: describing the engine and its voices ------------------------
+    about: str = ""             # one or two sentences about the engine
+    quality: int = 3            # default star rating, 1-5 (the user can override it)
+    needs_internet: bool = False
+    service: str = ""           # who generates the speech when needs_internet (e.g. "Google")
+
+    def describe_voice(self, voice_id: Optional[str]) -> Dict[str, str]:
+        """Details about one voice for the UI, as label -> value (in display order)."""
+        return {}
+
+    def voice_ready(self, voice_id: Optional[str]) -> bool:
+        """False if the next build will include one-time setup (a download, loading a model).
+
+        The app skips speed measurements for those builds so they don't skew the numbers.
+        """
+        return True
+
+    # --- Optional: engines the app can install for the user -------------------
+    install_note: str = ""  # shown when asking the user whether to install
+
+    def can_install(self) -> bool:
+        """True if install() can set up this engine's missing dependencies."""
+        return False
+
+    def install(self, log: Callable[[str], None], cancel_event: threading.Event) -> None:
+        """Install missing dependencies, reporting progress lines through `log`.
+
+        Raise SynthesisCancelled if `cancel_event` is set, or another exception on failure.
+        """
+        raise NotImplementedError()
+
     def synthesize(
         self,
         text: str,
         output_path: str,
         cancel_event: Optional[threading.Event] = None,
+        voice: Optional[str] = None,
     ) -> None:
         """Write speech for `text` to `output_path`.
 
+        `voice` is a voice_id from list_voices(), or None for the engine default.
         Engines should check `cancel_event` where they can and raise
         SynthesisCancelled when it is set. Engines that cannot be interrupted
         may ignore it; the caller discards their output.

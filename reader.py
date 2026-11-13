@@ -1,5 +1,5 @@
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 # Dependency check
 import sys
@@ -54,6 +54,27 @@ from tkinter import messagebox
 import tkinter.font as tkfont
 from tts_engines import get_engine, list_engines
 from tts_engines.base import SynthesisCancelled, run_cancellable
+
+if "--check-engines" in sys.argv[1:]:
+    # Diagnostics: report each engine's dependencies and try a short phrase with its default voice
+    import tempfile
+    for name in sorted(list_engines(), key=str.lower):
+        engine = get_engine(name)
+        missing = engine.check_dependencies()
+        if missing:
+            print(f"{name:10} not available: {', '.join(missing)}")
+            continue
+        try:
+            voices = engine.list_voices()
+            voice = next((v for v, label in voices if "download" not in label), voices[0][0] if voices else None)
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "test." + engine.output_ext)
+                engine.synthesize("Testing one two three.", path, threading.Event(), voice=voice)
+                size = os.path.getsize(path) if os.path.exists(path) else 0
+            print(f"{name:10} {'OK' if size else 'NO AUDIO'}: {len(voices)} voices, tested {voice or 'default'}")
+        except Exception as e:
+            print(f"{name:10} ERROR: {e}")
+    sys.exit(0)
 import word_timing
 
 # Initialize pygame mixer for audio playback
@@ -168,6 +189,11 @@ def default_settings():
         "theme": "auto",
         "view_mode": "compact",
         "full_window_size": "",
+        "voices": {},
+        "disabled_engines": [],
+        "disabled_voices": {},
+        "voice_stats": {},
+        "voice_ratings": {},
     }
 
 def normalize_loaded_hotkeys(raw_hotkeys):
@@ -194,7 +220,10 @@ def load_settings():
 def save_settings():
     try:
         with open(SETTINGS_FILE, "w") as f:
-            json.dump({"debug_mode": debug_mode, "playback_speed": playback_speed, "tts_engine": tts_engine, "hotkeys": hotkeys, "theme": ui_theme, "view_mode": view_mode, "full_window_size": full_window_size}, f, indent=2)
+            json.dump({"debug_mode": debug_mode, "playback_speed": playback_speed, "tts_engine": tts_engine, "hotkeys": hotkeys, "theme": ui_theme, "view_mode": view_mode, "full_window_size": full_window_size, "voices": engine_voices,
+                       "disabled_engines": sorted(disabled_engines),
+                       "disabled_voices": {k: sorted(v) for k, v in disabled_voices.items() if v},
+                       "voice_stats": voice_stats, "voice_ratings": voice_ratings}, f, indent=2)
     except Exception:
         pass
 
@@ -216,6 +245,66 @@ hotkeys = settings.get("hotkeys", DEFAULT_HOTKEYS.copy())
 ui_theme = settings.get("theme", "auto")  # "auto" follows the desktop, or "dark" / "light"
 view_mode = settings.get("view_mode", "compact")  # "compact" (controls only) or "full"
 full_window_size = settings.get("full_window_size", "")  # "WxH" remembered for full mode
+engine_voices = settings.get("voices", {})  # engine name -> chosen voice id
+# Engines and voices hidden from the drop-downs (managed in the full view)
+disabled_engines = set(settings.get("disabled_engines", []) or [])
+disabled_voices = {k: set(v) for k, v in (settings.get("disabled_voices", {}) or {}).items()}
+# Measured build speed per voice ("engine|voice" -> {"runs": n, "rtf": seconds of work per second of audio})
+voice_stats = settings.get("voice_stats", {}) or {}
+# The user's own star ratings ("engine|voice" -> 1-5); engines provide defaults
+voice_ratings = settings.get("voice_ratings", {}) or {}
+
+def voice_key(engine_name, voice_id):
+    return f"{engine_name}|{voice_id or ''}"
+
+def record_speed(engine_name, voice_id, build_seconds, audio_seconds):
+    """Fold one build into the running average (recent reads count most)."""
+    if audio_seconds < 0.5 or build_seconds <= 0:
+        return
+    key = voice_key(engine_name, voice_id)
+    stat = voice_stats.get(key, {"runs": 0, "rtf": 0.0})
+    weight = min(stat["runs"], 9)
+    stat["rtf"] = (stat["rtf"] * weight + build_seconds / audio_seconds) / (weight + 1)
+    stat["runs"] += 1
+    voice_stats[key] = stat
+
+def speed_word(rtf):
+    if rtf < 0.05:
+        return "Very fast"
+    if rtf < 0.25:
+        return "Fast"
+    if rtf < 0.6:
+        return "Moderate"
+    if rtf < 1.0:
+        return "Slow"
+    return "Very slow"
+
+def generated_where(engine, long=False):
+    """Where an engine makes its speech: on this computer, or by an online service."""
+    if engine.needs_internet:
+        who = engine.service or "an online service"
+        if long:
+            return f"Online by {who}. The text you read is sent to {who}'s servers."
+        return f"Online ({who})" if engine.service else "Online"
+    if long:
+        return "Locally, on this computer. Nothing you read is sent anywhere."
+    return "Locally"
+
+def stars(rating):
+    rating = max(0, min(5, int(round(rating))))
+    return "★" * rating + "☆" * (5 - rating)
+
+def enabled_engines():
+    """Engine names to offer, in display order (all of them if everything was disabled)."""
+    names = sorted(list_engines(), key=str.lower)
+    return [n for n in names if n not in disabled_engines] or names
+
+def enabled_voices(engine_name, voices):
+    """The voices to offer for an engine (all of them if every voice was disabled)."""
+    off = disabled_voices.get(engine_name, set())
+    return [v for v in voices if v[0] not in off] or list(voices)
+if not isinstance(engine_voices, dict):
+    engine_voices = {}
 
 # What is being read aloud, for the full view. reading_serial changes whenever
 # the text changes so the UI knows to reload it.
@@ -238,6 +327,7 @@ taskbar_icon_photo = None
 engine_missing_deps = False
 tray_icon = None
 current_build = None      # cancel Event for the audio build in progress, if any
+voices_changed_callback = None  # set by the UI: refresh the voice list for an engine
 build_counter = 0
 # Tk is only safe to touch from the main thread; other threads queue calls here.
 main_thread_calls = queue.Queue()
@@ -275,9 +365,8 @@ def cleanup_audio_files():
             os.remove(audio_file_mp3)
         if os.path.exists(audio_file_wav):
             os.remove(audio_file_wav)
-        temp_speed_file = str(SETTINGS_DIR / "clipboard_speech_speed.mp3")
-        if os.path.exists(temp_speed_file):
-            os.remove(temp_speed_file)
+        for speed_file in SETTINGS_DIR.glob("clipboard_speech_speed.*"):
+            speed_file.unlink(missing_ok=True)
         # Partial files from builds that were cancelled or interrupted
         for leftover in SETTINGS_DIR.glob("clipboard_speech.building*"):
             leftover.unlink(missing_ok=True)
@@ -460,8 +549,8 @@ def play_audio():
             print("⚠️ Audio file not ready for playback")
             return
         # Adjust speed for MP3 only
-        if playback_speed != 1.0 and tts_engine == "gTTS":
-            temp_speed_file = str(SETTINGS_DIR / "clipboard_speech_speed.mp3")
+        if playback_speed != 1.0:
+            temp_speed_file = str(SETTINGS_DIR / ("clipboard_speech_speed" + os.path.splitext(file_to_play)[1]))
             try:
                 run_cancellable(
                     ["ffmpeg", "-y", "-loglevel", "error", "-i", file_to_play,
@@ -579,6 +668,7 @@ def start_build(text):
     current_build = cancel_event
     build_counter += 1
     engine_name = tts_engine
+    voice = engine_voices.get(engine_name)
     final_path = get_output_path(engine_name)
     root, ext = os.path.splitext(final_path)
     # Build into a private file so a cancelled or stale build never clobbers the real one.
@@ -602,13 +692,16 @@ def start_build(text):
             if missing_deps:
                 results.put(("error", f"Missing: {', '.join(missing_deps)}"))
                 return
-            engine.synthesize(text, temp_path, cancel_event)
+            ready = engine.voice_ready(voice)  # False: this build includes a download or model load
+            started = time.monotonic()
+            engine.synthesize(text, temp_path, cancel_event, voice=voice)
+            build_seconds = time.monotonic() - started
             if cancel_event.is_set():
                 raise SynthesisCancelled()
             if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
                 results.put(("error", "Engine produced no audio"))
                 return
-            results.put(("done", None))
+            results.put(("done", (ready, build_seconds, get_audio_duration(temp_path))))
         except SynthesisCancelled:
             results.put(("cancelled", None))
         except Exception as e:
@@ -664,6 +757,11 @@ def start_build(text):
                 remove_temp()
                 return
             threading.Thread(target=play_audio, daemon=True).start()
+            if message and message[0]:
+                record_speed(engine_name, voice, message[1], message[2])
+                save_settings()
+            if voices_changed_callback is not None:
+                voices_changed_callback(engine_name)  # e.g. a Piper voice just finished downloading
             return
         remove_temp()
         if status == "error" and not cancel_event.is_set():
@@ -850,6 +948,12 @@ def apply_theme(root):
               bordercolor=[("disabled", p["border"])],
               foreground=[("disabled", p["disabled"])])
 
+    style.configure("Treeview", background=p["field"], fieldbackground=p["field"], foreground=p["fg"],
+                    bordercolor=p["border"], lightcolor=p["field"], darkcolor=p["field"], rowheight=24)
+    style.map("Treeview", background=[("selected", p["accent"])], foreground=[("selected", p["accent_fg"])])
+    style.configure("Treeview.Heading", background=p["button"], foreground=p["fg"], bordercolor=p["border"],
+                    lightcolor=p["button"], darkcolor=p["button"], font=bold)
+    style.map("Treeview.Heading", background=[("active", p["hover"])])
     style.configure("TCombobox", fieldbackground=p["field"], background=p["button"], foreground=p["fg"],
                     arrowcolor=p["fg"], bordercolor=p["border"], lightcolor=p["field"],
                     darkcolor=p["field"], padding=(6, 3))
@@ -895,6 +999,32 @@ def apply_theme(root):
     if debug_mode:
         print(f"🐛 [DEBUG] UI theme: {mode} (setting: {ui_theme})")
 
+def widen_popdown(combo):
+    """Let a combobox's drop-down list grow wider than the box so long names aren't cut off.
+
+    Tk always sizes the list to the box's width, so resize it right after it opens.
+    """
+    import re
+
+    def adjust():
+        try:
+            popdown = combo.tk.call("ttk::combobox::PopdownWindow", combo)
+            if str(combo.tk.call("wm", "state", popdown)) == "withdrawn":
+                return
+            font = tkfont.nametofont("TkDefaultFont")
+            needed = max((font.measure(str(v)) for v in combo.cget("values")), default=0) + 44
+            m = re.match(r"(\d+)x(\d+)([+-]-?\d+)([+-]-?\d+)", combo.tk.call("wm", "geometry", popdown))
+            if not m or needed <= int(m.group(1)):
+                return
+            x = min(int(m.group(3)), combo.winfo_screenwidth() - needed)
+            combo.tk.call("wm", "geometry", popdown, f"{needed}x{m.group(2)}+{max(0, x)}{m.group(4)}")
+        except Exception:
+            pass
+
+    # Tk places the list after running postcommand (and processes idle tasks while
+    # doing it), so wait a moment before resizing.
+    combo.configure(postcommand=lambda: combo.after(25, adjust))
+
 def themed_toplevel(parent, title):
     """A dialog window with the app's background and a padded content frame."""
     dialog = tk.Toplevel(parent)
@@ -906,7 +1036,7 @@ def themed_toplevel(parent, title):
     return dialog, content
 
 def create_control_window():
-    global control_window, playback_speed, hotkeys
+    global control_window, playback_speed, hotkeys, engine_missing_deps
     window = tk.Tk(className="reader")
     window.title("Clipboard Reader")
     window.resizable(False, False)
@@ -936,7 +1066,7 @@ def create_control_window():
 
     ttk.Label(form, text="Engine").grid(row=0, column=0, sticky="w", padx=(0, 10), pady=3)
     engine_var = tk.StringVar(value=tts_engine)
-    engine_dropdown = ttk.Combobox(form, textvariable=engine_var, values=list_engines(), state="readonly", width=14)
+    engine_dropdown = ttk.Combobox(form, textvariable=engine_var, values=enabled_engines(), state="readonly", width=14)
     engine_dropdown.grid(row=0, column=1, columnspan=2, sticky="ew", pady=3)
     def on_engine_select(event=None):
         global tts_engine, engine_missing_deps
@@ -952,20 +1082,168 @@ def create_control_window():
             pass
         tts_engine = engine_var.get()
         save_settings()
+        load_voices(tts_engine)
         missing_deps = check_engine_dependencies(tts_engine)
         if missing_deps:
-            safe_showwarning(
-                "Missing Dependencies",
-                "The selected TTS engine is missing:\n\n" + "\n".join(missing_deps),
-            )
             window.set_buttons_state(True)
             engine_missing_deps = True
+            handle_missing_engine(tts_engine, missing_deps)
         else:
             window.set_buttons_state(False)
             engine_missing_deps = False
     engine_dropdown.bind("<<ComboboxSelected>>", on_engine_select)
 
-    ttk.Label(form, text="Speed").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=3)
+    def handle_missing_engine(engine_name, missing_deps):
+        """Offer to install an engine the app can install; otherwise explain what's missing."""
+        engine = get_engine(engine_name)
+        if engine is not None and engine.can_install():
+            question = (f"{engine_name} isn't installed yet.\n\n{engine.install_note}\n\nInstall it now?")
+            if messagebox.askyesno(f"Install {engine_name}?", question, parent=window):
+                open_install_dialog(engine_name)
+            return
+        safe_showwarning(
+            "Missing Dependencies",
+            f"The TTS engine '{engine_name}' is missing:\n\n" + "\n".join(missing_deps),
+        )
+
+    def open_install_dialog(engine_name):
+        """Run engine.install() in the background with a live log and a Cancel button."""
+        engine = get_engine(engine_name)
+        cancel_event = threading.Event()
+        lines = queue.Queue()
+        result = {}
+        dialog, body = themed_toplevel(window, f"Installing {engine_name}")
+        dialog.transient(window)
+        heading = ttk.Label(body, text=f"Installing {engine_name}…", style="Header.TLabel")
+        heading.pack(anchor="w")
+        progress = ttk.Progressbar(body, orient=tk.HORIZONTAL, length=460, mode="indeterminate")
+        progress.pack(fill=tk.X, pady=(8, 8))
+        progress.start(12)
+        log_frame = ttk.Frame(body)
+        log_frame.pack(fill=tk.BOTH, expand=True)
+        log_view = tk.Text(log_frame, height=12, width=72, wrap=tk.NONE, font=_theme_fonts["small"],
+                           background=PALETTE["field"], foreground=PALETTE["muted"], relief=tk.FLAT,
+                           highlightthickness=1, highlightbackground=PALETTE["border"],
+                           highlightcolor=PALETTE["border"], padx=8, pady=6)
+        log_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=log_view.yview)
+        log_view.configure(yscrollcommand=log_scroll.set, state=tk.DISABLED)
+        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        log_view.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        button = ttk.Button(body, text="Cancel")
+        button.pack(anchor="e", pady=(10, 0))
+
+        def on_button():
+            if "done" in result:
+                dialog.destroy()
+            elif not cancel_event.is_set():
+                cancel_event.set()
+                heading.config(text="Cancelling…")
+                button.state(["disabled"])
+        button.config(command=on_button)
+        dialog.protocol("WM_DELETE_WINDOW", on_button)
+
+        def worker():
+            try:
+                engine.install(lines.put, cancel_event)
+                result["done"] = "ok"
+            except SynthesisCancelled:
+                result["done"] = "cancelled"
+            except Exception as e:
+                result["done"] = "error"
+                result["error"] = str(e)
+
+        def poll():
+            global engine_missing_deps
+            added = False
+            while True:
+                try:
+                    line = lines.get_nowait()
+                except queue.Empty:
+                    break
+                log_view.configure(state=tk.NORMAL)
+                log_view.insert(tk.END, line + "\n")
+                if int(log_view.index("end-1c").split(".")[0]) > 2000:
+                    log_view.delete("1.0", "500.0")  # keep the log from growing forever
+                log_view.configure(state=tk.DISABLED)
+                added = True
+            if added:
+                log_view.see(tk.END)
+            if "done" not in result:
+                dialog.after(150, poll)
+                return
+            progress.stop()
+            button.state(["!disabled"])
+            button.config(text="Close")
+            status = result["done"]
+            if status == "ok":
+                heading.config(text=f"{engine_name} is installed and ready.")
+                progress.configure(mode="determinate", value=100)
+                if tts_engine == engine_name:
+                    engine_missing_deps = False
+                    window.set_buttons_state(False)
+                    load_voices(engine_name)
+            elif status == "cancelled":
+                dialog.destroy()
+                print(f"Install of {engine_name} cancelled")
+            else:
+                heading.config(text=f"Install failed: {result.get('error', '')}", style="Error.TLabel",
+                               wraplength=460)
+                print(f"Install of {engine_name} failed: {result.get('error')}")
+
+        threading.Thread(target=worker, daemon=True).start()
+        poll()
+
+    ttk.Label(form, text="Voice").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=3)
+    voice_var = tk.StringVar(value="Loading voices…")
+    voice_dropdown = ttk.Combobox(form, textvariable=voice_var, values=[], state="disabled", width=14)
+    voice_dropdown.grid(row=1, column=1, columnspan=2, sticky="ew", pady=3)
+    widen_popdown(voice_dropdown)
+    voice_choices = {"engine": None, "ids": []}
+
+    def show_voices(engine_name, voices):
+        """Fill the Voice list for engine_name (main thread)."""
+        if engine_name != tts_engine:
+            return  # the user switched engines while this list was loading
+        voice_choices["engine"] = engine_name
+        voices = enabled_voices(engine_name, voices)
+        voice_choices["ids"] = [voice_id for voice_id, _ in voices]
+        if not voices:
+            voice_dropdown.configure(values=["Default"], state="disabled")
+            voice_var.set("Default")
+            return
+        saved = engine_voices.get(engine_name)
+        index = voice_choices["ids"].index(saved) if saved in voice_choices["ids"] else 0
+        engine_voices[engine_name] = voice_choices["ids"][index]
+        voice_dropdown.configure(values=[label for _, label in voices], state="readonly")
+        voice_dropdown.current(index)
+
+    def load_voices(engine_name, show_loading=True):
+        """List the engine's voices in the background (some engines are slow to list)."""
+        if show_loading:
+            voice_dropdown.configure(values=[], state="disabled")
+            voice_var.set("Loading voices…")
+        def worker():
+            engine = get_engine(engine_name)
+            try:
+                voices = engine.list_voices() if engine and not engine.check_dependencies() else []
+            except Exception as e:
+                print(f"Could not list voices for {engine_name}: {e}")
+                voices = []
+            main_thread_calls.put(lambda: show_voices(engine_name, voices))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_voice_select(event=None):
+        index = voice_dropdown.current()
+        if voice_choices["engine"] == tts_engine and 0 <= index < len(voice_choices["ids"]):
+            engine_voices[tts_engine] = voice_choices["ids"][index]
+            save_settings()
+    voice_dropdown.bind("<<ComboboxSelected>>", on_voice_select)
+
+    global voices_changed_callback
+    voices_changed_callback = lambda name: main_thread_calls.put(lambda: load_voices(name, show_loading=False))
+    load_voices(tts_engine)
+
+    ttk.Label(form, text="Speed").grid(row=2, column=0, sticky="w", padx=(0, 10), pady=3)
     speed_var = tk.DoubleVar(value=playback_speed)
     def on_speed_change(val):
         global playback_speed
@@ -976,9 +1254,9 @@ def create_control_window():
         save_settings()
         slider_value_label.config(text=f"{playback_speed:.1f}x")
     speed_slider = ttk.Scale(form, from_=0.5, to=2.0, orient=tk.HORIZONTAL, variable=speed_var, command=on_speed_change, length=130)
-    speed_slider.grid(row=1, column=1, sticky="ew", pady=3)
+    speed_slider.grid(row=2, column=1, sticky="ew", pady=3)
     slider_value_label = ttk.Label(form, text=f"{playback_speed:.1f}x", width=4, anchor="e")
-    slider_value_label.grid(row=1, column=2, sticky="e", padx=(8, 0), pady=3)
+    slider_value_label.grid(row=2, column=2, sticky="e", padx=(8, 0), pady=3)
 
     # Set window/taskbar icon
     try:
@@ -1125,6 +1403,345 @@ def create_control_window():
         debug_mode = (debug_var.get() == "ON")
         save_settings()
     debug_dropdown.bind("<<ComboboxSelected>>", on_debug_select)
+    manage_btn = ttk.Button(options_form, text="Engines & Voices…", command=lambda: open_engine_manager())
+    manage_btn.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 3))
+
+    def refresh_engine_choices():
+        """Re-apply enable/disable settings to the Engine and Voice lists."""
+        names = enabled_engines()
+        engine_dropdown.configure(values=names)
+        if tts_engine not in names:
+            engine_var.set(names[0])
+            on_engine_select()  # the current engine was turned off: switch to the first one on
+        else:
+            load_voices(tts_engine, show_loading=False)
+
+    def open_engine_manager():
+        """Turn engines and voices on or off, and see details, speed and ratings for each."""
+        dialog, body = themed_toplevel(window, "Engines & Voices")
+        dialog.transient(window)
+        dialog.resizable(True, True)
+        dialog.minsize(950, 520)
+        ttk.Label(body, text="Click a row's box to turn it on or off; turned-off engines and voices are hidden "
+                             "from the drop-downs. Select a row to see its details.", wraplength=780).pack(anchor="w")
+
+        panes = ttk.Frame(body)
+        panes.pack(fill=tk.BOTH, expand=True, pady=(10, 8))
+        tree_frame = ttk.Frame(panes)
+        tree_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree = ttk.Treeview(tree_frame, columns=("where", "speed", "quality"), show="tree headings",
+                            selectmode="browse", height=16)
+        tree.heading("#0", text="Engine / voice", anchor="w")
+        tree.heading("where", text="Generated", anchor="w")
+        tree.heading("speed", text="Speed", anchor="w")
+        tree.heading("quality", text="Quality", anchor="w")
+        tree.column("#0", width=300, stretch=True)
+        tree.column("where", width=130, stretch=False)
+        tree.column("speed", width=90, stretch=False)
+        tree.column("quality", width=96, stretch=False)
+        scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree.tag_configure("off", foreground=PALETTE["disabled"])
+        tree.tag_configure("engine", font=_theme_fonts["bold"])
+
+        ttk.Separator(panes, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=12)
+        details = ttk.Frame(panes, width=300)
+        details.pack(side=tk.LEFT, fill=tk.Y)
+        details.pack_propagate(False)
+
+        note = ttk.Label(body, text="", style="Muted.TLabel")
+        note.pack(anchor="w")
+        buttons = ttk.Frame(body)
+        buttons.pack(fill=tk.X, pady=(10, 0))
+
+        all_names = sorted(list_engines(), key=str.lower)
+        voice_lists = {}   # engine -> [(voice_id, label)]
+        rows = {}          # tree item -> ("engine", name) or ("voice", name, voice_id)
+        engine_items = {}
+        selected = {"row": None}
+
+        def box(on):
+            return "☑" if on else "☐"
+
+        def rating_of(name, voice_id):
+            return voice_ratings.get(voice_key(name, voice_id), get_engine(name).quality)
+
+        def speed_of(name, voice_id=None):
+            """(rtf, runs) for a voice, or the average over an engine's measured voices."""
+            if voice_id is not None:
+                stat = voice_stats.get(voice_key(name, voice_id))
+                return (stat["rtf"], stat["runs"]) if stat else (None, 0)
+            measured = [v for k, v in voice_stats.items() if k.split("|", 1)[0] == name]
+            if not measured:
+                return None, 0
+            return sum(v["rtf"] for v in measured) / len(measured), sum(v["runs"] for v in measured)
+
+        def engine_text(name):
+            text = f"{box(name not in disabled_engines)}  {name}"
+            voices = voice_lists.get(name)
+            if voices:
+                on = sum(1 for v, _ in voices if v not in disabled_voices.get(name, set()))
+                text += f"   ({on} of {len(voices)} on)"
+            elif voices is None:
+                text += "   (loading…)"
+            if get_engine(name).check_dependencies():
+                text += "   – not installed"
+            return text
+
+        def redraw(name):
+            item = engine_items[name]
+            rtf, _ = speed_of(name)
+            tree.item(item, text=engine_text(name),
+                      values=(generated_where(get_engine(name)), speed_word(rtf) if rtf is not None else "—",
+                              stars(get_engine(name).quality)),
+                      tags=("engine",) + (("off",) if name in disabled_engines else ()))
+            labels = dict(voice_lists.get(name, []))
+            for child in tree.get_children(item):
+                kind = rows.get(child)
+                if kind and kind[0] == "voice":
+                    on = kind[2] not in disabled_voices.get(name, set())
+                    rtf, _ = speed_of(name, kind[2])
+                    tree.item(child, text=f"{box(on)}  {labels.get(kind[2], kind[2])}",
+                              values=(generated_where(get_engine(name)), speed_word(rtf) if rtf is not None else "—",
+                                      stars(rating_of(name, kind[2]))),
+                              tags=() if on and name not in disabled_engines else ("off",))
+
+        for name in all_names:
+            item = tree.insert("", tk.END, text="", open=False)
+            engine_items[name] = item
+            rows[item] = ("engine", name)
+            redraw(name)
+
+        def fill_voices(name, voices):
+            voice_lists[name] = voices
+            item = engine_items[name]
+            for child in tree.get_children(item):
+                tree.delete(child)
+            for voice_id, _ in voices:
+                child = tree.insert(item, tk.END, text="")
+                rows[child] = ("voice", name, voice_id)
+            redraw(name)
+            if selected["row"] and rows.get(selected["row"], (None, None))[1] == name:
+                show_details(selected["row"])
+
+        def load_all():
+            for name in all_names:
+                engine = get_engine(name)
+                try:
+                    voices = engine.list_voices() if not engine.check_dependencies() else []
+                except Exception:
+                    voices = []
+                main_thread_calls.put(lambda n=name, v=voices: dialog.winfo_exists() and fill_voices(n, v))
+        threading.Thread(target=load_all, daemon=True).start()
+
+        # ---- details panel
+        def clear_details():
+            for child in details.winfo_children():
+                child.destroy()
+
+        def field(grid, row, label, value):
+            ttk.Label(grid, text=label, style="Muted.TLabel").grid(row=row, column=0, sticky="nw", padx=(0, 10), pady=2)
+            ttk.Label(grid, text=value, wraplength=190, justify="left").grid(row=row, column=1, sticky="nw", pady=2)
+
+        def speed_sentence(rtf, runs):
+            if rtf is None:
+                return "Not measured yet. Read something or press Preview."
+            seconds = rtf * 60
+            took = f"{seconds:.0f} s" if seconds >= 1.5 else f"{seconds:.1f} s"
+            return f"{speed_word(rtf)}: about {took} to build 1 minute of speech ({runs} read{'s' if runs != 1 else ''})"
+
+        def show_details(item):
+            selected["row"] = item
+            kind = rows.get(item)
+            clear_details()
+            if not kind:
+                return
+            name = kind[1]
+            engine = get_engine(name)
+            voice_id = kind[2] if kind[0] == "voice" else None
+            label = dict(voice_lists.get(name, [])).get(voice_id, voice_id) if voice_id else name
+            ttk.Label(details, text=label, style="Header.TLabel", wraplength=290).pack(anchor="w")
+            subtitle = f"{name} voice" if voice_id else engine.about
+            ttk.Label(details, text=subtitle, style="Muted.TLabel", wraplength=290, justify="left").pack(anchor="w", pady=(2, 8))
+            grid = ttk.Frame(details)
+            grid.pack(anchor="w", fill=tk.X)
+            row = 0
+            if voice_id is None:
+                missing = engine.check_dependencies()
+                voices = voice_lists.get(name)
+                field(grid, row, "Status", "Not installed" if missing else ("On" if name not in disabled_engines else "Off")); row += 1
+                field(grid, row, "Voices", "loading…" if voices is None else str(len(voices) or 1)); row += 1
+                field(grid, row, "Generated", generated_where(engine, long=True)); row += 1
+                field(grid, row, "Internet", "Needed" if engine.needs_internet else "Not needed (works offline)"); row += 1
+                field(grid, row, "Format", engine.output_ext.upper()); row += 1
+                rtf, runs = speed_of(name)
+                field(grid, row, "Speed", speed_sentence(rtf, runs)); row += 1
+                field(grid, row, "Quality", f"{stars(engine.quality)}  (typical for this engine)"); row += 1
+            else:
+                try:
+                    info = engine.describe_voice(voice_id)
+                except Exception as e:
+                    info = {"Details": f"unavailable ({e})"}
+                field(grid, row, "Generated", generated_where(engine, long=True)); row += 1
+                for key, value in info.items():
+                    if key == "Runs":
+                        continue  # covered by "Generated"
+                    field(grid, row, key, value); row += 1
+                rtf, runs = speed_of(name, voice_id)
+                field(grid, row, "Speed", speed_sentence(rtf, runs)); row += 1
+
+                rating_row = ttk.Frame(details)
+                rating_row.pack(anchor="w", pady=(10, 0))
+                ttk.Label(rating_row, text="Your rating", style="Muted.TLabel").pack(side=tk.LEFT, padx=(0, 8))
+                current = rating_of(name, voice_id)
+                key = voice_key(name, voice_id)
+                for n in range(1, 6):
+                    star = ttk.Label(rating_row, text="★" if n <= current else "☆", cursor="hand2",
+                                     foreground=PALETTE["accent"], font=_theme_fonts["reading"])
+                    star.pack(side=tk.LEFT)
+                    star.bind("<Button-1>", lambda _e, n=n: set_rating(key, n))
+                if key in voice_ratings:
+                    reset = ttk.Label(rating_row, text="reset", style="Muted.TLabel", cursor="hand2")
+                    reset.pack(side=tk.LEFT, padx=(8, 0))
+                    reset.bind("<Button-1>", lambda _e: set_rating(key, None))
+                else:
+                    ttk.Label(rating_row, text="(default)", style="Muted.TLabel").pack(side=tk.LEFT, padx=(8, 0))
+
+            preview_row = ttk.Frame(details)
+            preview_row.pack(anchor="w", fill=tk.X, pady=(14, 0))
+            preview_btn = ttk.Button(preview_row, text="▶  Preview", command=lambda: preview(name, voice_id, preview_status, preview_btn))
+            preview_btn.pack(side=tk.LEFT)
+            preview_status = ttk.Label(preview_row, text="", style="Muted.TLabel", wraplength=180)
+            preview_status.pack(side=tk.LEFT, padx=(8, 0))
+            if engine.check_dependencies():
+                preview_btn.state(["disabled"])
+
+        def set_rating(key, value):
+            if value is None:
+                voice_ratings.pop(key, None)
+            else:
+                voice_ratings[key] = value
+            save_settings()
+            name = key.split("|", 1)[0]
+            redraw(name)
+            show_details(selected["row"])
+
+        def preview(name, voice_id, status_label, button):
+            """Speak a short sample with this voice (and measure its speed)."""
+            if pygame.mixer.music.get_busy() or current_build is not None or audio_preparing:
+                status_label.config(text="Stop the current reading first.")
+                return
+            engine = get_engine(name)
+            if voice_id is None:
+                choices = [v for v, _ in enabled_voices(name, voice_lists.get(name, []))]
+                voice_id = engine_voices.get(name) if engine_voices.get(name) in choices else (choices[0] if choices else None)
+            button.state(["disabled"])
+            status_label.config(text="Building sample…")
+            speaker = (dict(voice_lists.get(name, [])).get(voice_id, name) or name).split(" (")[0]
+            sample = f"Hello, this is {speaker}. Here is how I sound reading a sentence aloud."
+
+            def work():
+                import tempfile
+                try:
+                    ready = engine.voice_ready(voice_id)
+                    tmp = tempfile.mkdtemp(prefix="textreader-preview-")
+                    path = os.path.join(tmp, "sample." + engine.output_ext)
+                    started = time.monotonic()
+                    engine.synthesize(sample, path, threading.Event(), voice=voice_id)
+                    took = time.monotonic() - started
+                    length = get_audio_duration(path)
+                    wav = path
+                    if not path.endswith(".wav"):
+                        wav = os.path.join(tmp, "sample.wav")
+                        run_cancellable(["ffmpeg", "-y", "-loglevel", "error", "-i", path, wav], timeout=30)
+                    sound = pygame.mixer.Sound(wav)
+                    sound.play()
+                    def done():
+                        if ready:
+                            record_speed(name, voice_id, took, length)
+                            save_settings()
+                        if dialog.winfo_exists():
+                            redraw(name)
+                            show_details(selected["row"])
+                    main_thread_calls.put(done)
+                    time.sleep(sound.get_length() + 0.5)
+                    shutil.rmtree(tmp, ignore_errors=True)
+                except Exception as e:
+                    main_thread_calls.put(lambda: status_label.winfo_exists() and (
+                        status_label.config(text=f"Preview failed: {e}"), button.state(["!disabled"])))
+            threading.Thread(target=work, daemon=True).start()
+
+        def changed():
+            save_settings()
+            refresh_engine_choices()
+
+        def toggle(item):
+            kind = rows.get(item)
+            if not kind:
+                return
+            note.config(text="")
+            if kind[0] == "engine":
+                name = kind[1]
+                if name in disabled_engines:
+                    disabled_engines.discard(name)
+                elif len([n for n in all_names if n not in disabled_engines]) <= 1:
+                    note.config(text="At least one engine has to stay on.")
+                    return
+                else:
+                    disabled_engines.add(name)
+            else:
+                _, name, voice_id = kind
+                off = disabled_voices.setdefault(name, set())
+                if voice_id in off:
+                    off.discard(voice_id)
+                elif len(voice_lists.get(name, [])) - len(off) <= 1:
+                    note.config(text=f"At least one {name} voice has to stay on.")
+                    return
+                else:
+                    off.add(voice_id)
+            redraw(kind[1])
+            changed()
+            if selected["row"] == item:
+                show_details(item)
+
+        def on_click(event):
+            item = tree.identify_row(event.y)
+            if not item or tree.identify_region(event.x, event.y) not in ("tree", "cell"):
+                return
+            element = tree.identify_element(event.x, event.y)
+            if element in ("Treeitem.indicator", "indicator"):
+                return  # the expand arrow only opens/closes the engine
+            # Only clicks on the box (left part of the name column) toggle; elsewhere just selects
+            if tree.identify_column(event.x) == "#0":
+                bbox = tree.bbox(item, "#0")
+                if bbox and event.x - bbox[0] < 60 + (20 if rows[item][0] == "voice" else 0):
+                    toggle(item)
+        tree.bind("<ButtonRelease-1>", on_click)
+        tree.bind("<<TreeviewSelect>>", lambda _e: tree.selection() and show_details(tree.selection()[0]))
+        tree.bind("<space>", lambda e: toggle(tree.focus()))
+
+        def set_all_voices(on):
+            item = tree.focus()
+            kind = rows.get(item)
+            if not kind:
+                note.config(text="Select an engine or one of its voices first.")
+                return
+            name = kind[1]
+            disabled_voices[name] = set() if on else {v for v, _ in voice_lists.get(name, [])[1:]}
+            if not on:
+                note.config(text=f"All {name} voices off except the first (one has to stay on).")
+            redraw(name)
+            changed()
+
+        ttk.Button(buttons, text="All voices on", command=lambda: set_all_voices(True)).pack(side=tk.LEFT)
+        ttk.Button(buttons, text="All voices off", command=lambda: set_all_voices(False)).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(buttons, text="Close", style="Accent.TButton", command=dialog.destroy, width=8).pack(side=tk.RIGHT)
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
+
+        # Start with the current engine selected
+        tree.selection_set(engine_items.get(tts_engine, engine_items[all_names[0]]))
 
     version_label = ttk.Label(content, text=f"Version {__version__}", style="Muted.TLabel")
     version_label.pack(pady=(12, 0))
@@ -1280,10 +1897,7 @@ def create_control_window():
         else:
             print(f"🐛 [DEBUG] Selected engine {tts_engine} dependencies satisfied")
     if current_missing:
-        safe_showwarning(
-            "Missing TTS Dependencies",
-            f"The selected TTS engine '{tts_engine}' is missing:\n\n" + "\n".join(current_missing),
-        )
+        window.after(400, lambda: handle_missing_engine(tts_engine, current_missing))
     if current_missing:
         engine_missing_deps = True
         window.set_buttons_state(True)
@@ -1507,9 +2121,8 @@ if os.path.exists(audio_file_mp3):
     os.remove(audio_file_mp3)
 if os.path.exists(audio_file_wav):
     os.remove(audio_file_wav)
-temp_speed_file = str(SETTINGS_DIR / "clipboard_speech_speed.mp3")
-if os.path.exists(temp_speed_file):
-    os.remove(temp_speed_file)
+for speed_file in SETTINGS_DIR.glob("clipboard_speech_speed.*"):
+    speed_file.unlink(missing_ok=True)
 icon_path = SETTINGS_DIR / "lips_icon.png"
 if os.path.exists(icon_path):
     os.remove(icon_path)

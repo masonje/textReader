@@ -8,5 +8,9 @@ pynput==1.8.1
 pyttsx3==2.99
 numpy
 
+piper-tts==1.8.0
+edge-tts==7.3.1
+
 # Optional engine dependencies
-coqui-tts ; python_version < "3.12"
+# Coqui TTS is large (installs PyTorch, several GB) and slow on CPU. To use it:
+#   pip install coqui-tts

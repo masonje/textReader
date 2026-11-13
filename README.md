@@ -1,7 +1,7 @@
 # Clipboard Reader
 Reads text aloud. Python version of text aloud mp3 to run on Linux, Windows, or macOS.
 
-**Version:** 1.2.0 — see [Changelog](#changelog) for what changed in each version.
+**Version:** 1.3.0 — see [Changelog](#changelog) for what changed in each version.
 
 ## Requirements
 
@@ -10,11 +10,13 @@ Reads text aloud. Python version of text aloud mp3 to run on Linux, Windows, or 
 	- pyperclip
 	- gtts (for gTTS engine)
 	- pyttsx3 (for pyttsx3 engine)
+	- piper-tts (for Piper engine)
+	- edge-tts (for Edge TTS engine)
 	- pygame
 	- pystray
 	- Pillow
 	- pynput
-	- coqui-tts (for Coqui TTS engine, requires Python 3.11 or lower)
+	- coqui-tts (optional, for Coqui TTS; not in requirements.txt because it needs PyTorch. The app can install it for you, see below.)
 
 - ffmpeg (for audio speed control)
 - espeak-ng (for eSpeak-NG engine)
@@ -48,7 +50,8 @@ Each TTS engine lives in the tts_engines directory and implements a common inter
 - tts_engines/base.py
 	- Defines the `TTSEngine` base class
 	- Required fields: `name`, `output_ext`
-	- Required methods: `check_dependencies()`, `synthesize(text, output_path, cancel_event=None)`
+	- Required methods: `check_dependencies()`, `synthesize(text, output_path, cancel_event=None, voice=None)`
+	- Optional: `list_voices()` returns `(voice_id, label)` pairs, best default first
 	- `run_cancellable(cmd, cancel_event, input_text=None)`: helper that runs an external command and kills it if the build is cancelled
 	- `SynthesisCancelled`: exception an engine raises when it stops because of a cancel
 
@@ -58,11 +61,32 @@ Each TTS engine lives in the tts_engines directory and implements a common inter
 	- Exposes `list_engines()` and `get_engine(name)`
 
 ### Included engines
-- gTTS: [tts_engines/engine_gtts.py](tts_engines/engine_gtts.py)
-- pyttsx3: [tts_engines/engine_pyttsx3.py](tts_engines/engine_pyttsx3.py)
-- eSpeak-NG: [tts_engines/engine_espeak.py](tts_engines/engine_espeak.py)
-- Festival: [tts_engines/engine_festival.py](tts_engines/engine_festival.py)
-- Coqui TTS: [tts_engines/engine_coqui.py](tts_engines/engine_coqui.py)
+
+Pick the engine and voice in the control window. Each engine remembers its own voice choice.
+
+In the Full view, **Engines & Voices…** (bottom left) opens a list of every engine and voice showing where its speech is **Generated**, its **Speed**, and its **Quality**:
+- **Generated:** "Locally" means the speech is made on your computer and nothing you read leaves it (Piper, Coqui, eSpeak-NG, Festival, pyttsx3). "Online (Google)" for gTTS and "Online (Microsoft)" for Edge TTS mean the text you read is sent to that company's servers, which return the audio. Piper downloads each voice once but then runs offline.
+- **Details:** select an engine or voice to see its details: gender, accent, whether it needs the internet, download size, audio format, the model or service behind it, and for Edge voices Microsoft's personality and "good for" tags.
+- **Speed** is measured, not guessed. Every read (and every Preview) records how long the voice took to build compared with how long the speech is. "About 8 s to build 1 minute of speech" means fast. Builds that include a one-time download or model load are skipped.
+- **Quality** starts at a typical rating for the engine. Click the stars to rate a voice yourself, or **reset** to go back to the default.
+- **▶ Preview** speaks a short sample with the selected voice.
+- **On/off:** click a row's ☑ box to turn it on or off. Turned-off ones disappear from the Engine and Voice drop-downs. **All voices on** and **All voices off** act on the selected engine. At least one engine, and one voice per engine, always stays on.
+
+These are saved in settings.json as `disabled_engines`, `disabled_voices`, `voice_stats` and `voice_ratings`.
+
+| Engine | Voices | Quality | Needs |
+|---|---|---|---|
+| [Piper](tts_engines/engine_piper.py) | 15 English voices (US, UK, Scottish; male and female) | Natural neural voices, offline | Each voice is ~63 MB, downloaded the first time it's used to `~/.textReader/voices/piper` |
+| [Edge TTS](tts_engines/engine_edge.py) | ~47 English voices from Microsoft (US, UK, Australia, Canada, India, Ireland, and more) | Very natural neural voices | Internet connection |
+| [gTTS](tts_engines/engine_gtts.py) | 8 English accents (US, UK, Australia, Canada, India, Ireland, South Africa, Nigeria) | Good | Internet connection |
+| [pyttsx3](tts_engines/engine_pyttsx3.py) | The system's speech voices (eSpeak on Linux, SAPI on Windows, NSSpeech on macOS) | Robotic on Linux | — |
+| [eSpeak-NG](tts_engines/engine_espeak.py) | English accents, plus female variants of US and UK English | Robotic | `espeak-ng` |
+| [Festival](tts_engines/engine_festival.py) | Installed Festival voices (e.g. `festvox-kallpc16k`) | Robotic | `festival` |
+| [Coqui TTS](tts_engines/engine_coqui.py) | One voice (Tacotron2) | Neural, slow on CPU | Installed on request, about 1 GB (see below) |
+
+**Installing Coqui TTS:** pick Coqui TTS as the engine and the app offers to install it. It creates a private Python environment in `~/.textReader/engines/coqui` and installs CPU-only PyTorch and Coqui there (about 1 GB, several minutes). It shows the progress, and you can cancel. Coqui then runs in a background worker process that keeps the model loaded between reads. To remove it, delete `~/.textReader/engines`. If you run from source and have `coqui-tts` installed in the app's own environment, that is used instead.
+
+Run `reader --check-engines` (or `python reader.py --check-engines`) to see which engines work and try each one.
 
 ### Adding a new engine
 1. Create a new engine file in tts_engines with the `engine_*.py` prefix (e.g., engine_mytts.py).
@@ -70,7 +94,8 @@ Each TTS engine lives in the tts_engines directory and implements a common inter
 	- `name`: what shows up in the UI dropdown
 	- `output_ext`: `mp3` or `wav`
 	- `check_dependencies()`: return a list of missing deps
-	- `synthesize(text, output_path, cancel_event=None)`: write audio to output_path. Check `cancel_event.is_set()` where you can and raise `SynthesisCancelled`; for external commands use `run_cancellable()`. Engines that can't be interrupted can ignore it, and the app throws away their output.
+	- `list_voices()` (optional): return `(voice_id, label)` pairs; the UI shows the labels and passes the chosen `voice_id` back
+	- `synthesize(text, output_path, cancel_event=None, voice=None)`: write audio to output_path. Check `cancel_event.is_set()` where you can and raise `SynthesisCancelled`; for external commands use `run_cancellable()`. Engines that can't be interrupted can ignore it, and the app throws away their output.
 3. No manual registration required. The module is auto-discovered on startup.
 
 The main app (reader.py) only calls `get_engine()` and `synthesize()` and does not contain per-engine logic.
@@ -149,6 +174,21 @@ In testing with gTTS, sentence starts landed within about 0.1 s of the real audi
 ## Changelog
 
 The version number is also stored in `__version__` at the top of `reader.py`.
+
+### 1.3.0 — 2026-11-13
+- **Added:** Voice choice. A Voice drop-down under Engine lists each engine's voices, and the choice is remembered per engine (`"voices"` in settings.json).
+- **Added:** Piper engine: natural, offline neural voices (15 English voices). Each downloads on first use.
+- **Added:** Edge TTS engine: Microsoft's online neural voices (about 47 English voices).
+- **Added:** gTTS accents (US, UK, Australia, Canada, India, Ireland, South Africa, Nigeria); female and regional eSpeak voices; the system voices for pyttsx3; and installed Festival voices.
+- **Added:** An Engines & Voices manager (Full view, bottom left) to turn engines and individual voices on or off, so the drop-downs only show the ones you use.
+- **Added:** A "Generated" column and field showing whether each engine and voice makes speech on this computer or through an online service (gTTS: Google, Edge TTS: Microsoft), including that the text being read is sent to that service. Engines name their service with a new `service` attribute.
+- **Added:** Voice details in the manager: each engine and voice shows what it is (gender, accent, online/offline, download size, audio format, model or service, and Edge's personality and "good for" tags), its measured speed, and a star quality rating you can change, plus a Preview button. Engines can provide this through new optional `about`, `quality`, `needs_internet`, `describe_voice()` and `voice_ready()`.
+- **Added:** `--check-engines` reports which engines work and tests each one.
+- **Fixed:** pyttsx3 wasn't installed and failed with "Engine produced no audio" on multi-line text, because its eSpeak driver could return before it finished writing the file.
+- **Fixed:** The speed setting only worked with gTTS. It now applies to every engine.
+- **Added:** The app can install Coqui TTS for you. Choosing it offers a one-click install into a private environment (CPU-only PyTorch, about 1 GB) with a live log and Cancel. Coqui then runs in a background worker, so it also works in the packaged app. Engines can offer this through new optional `can_install()` and `install()` methods.
+- **Fixed:** After switching to an engine with missing dependencies, the status still said "Stopped" and the buttons came back on, because the startup code kept a separate copy of the "missing dependencies" flag.
+- **Changed:** Drop-down lists grow wider than their box so long voice names aren't cut off.
 
 ### 1.2.0 — 2026-11-12
 - **Added:** Compact and Full views. Compact is the existing control window. Full adds a resizable "Now Reading" panel that shows the text being read aloud, highlights the current word, dims words already read, scrolls to follow along, and shows "Word N of M". The view and the Full window size are remembered.
