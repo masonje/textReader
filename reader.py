@@ -1,5 +1,5 @@
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 # Dependency check
 import sys
@@ -194,6 +194,7 @@ def default_settings():
         "disabled_voices": {},
         "voice_stats": {},
         "voice_ratings": {},
+        "surprise_voice": False,
     }
 
 def normalize_loaded_hotkeys(raw_hotkeys):
@@ -223,7 +224,8 @@ def save_settings():
             json.dump({"debug_mode": debug_mode, "playback_speed": playback_speed, "tts_engine": tts_engine, "hotkeys": hotkeys, "theme": ui_theme, "view_mode": view_mode, "full_window_size": full_window_size, "voices": engine_voices,
                        "disabled_engines": sorted(disabled_engines),
                        "disabled_voices": {k: sorted(v) for k, v in disabled_voices.items() if v},
-                       "voice_stats": voice_stats, "voice_ratings": voice_ratings}, f, indent=2)
+                       "voice_stats": voice_stats, "voice_ratings": voice_ratings,
+                       "surprise_voice": surprise_voice}, f, indent=2)
     except Exception:
         pass
 
@@ -253,6 +255,58 @@ disabled_voices = {k: set(v) for k, v in (settings.get("disabled_voices", {}) or
 voice_stats = settings.get("voice_stats", {}) or {}
 # The user's own star ratings ("engine|voice" -> 1-5); engines provide defaults
 voice_ratings = settings.get("voice_ratings", {}) or {}
+surprise_voice = bool(settings.get("surprise_voice", False))  # pick a random voice for each read
+
+# Voice lists by engine, filled in the background so a surprise pick never waits on a slow engine
+voice_cache = {}
+last_voice_used = None  # (engine name, voice label) of the most recent read
+last_audio_file = None  # the file the most recent read built (its engine may differ from the selected one)
+
+def prefetch_voice_lists():
+    for name in list_engines():
+        engine = get_engine(name)
+        try:
+            if not engine.check_dependencies():
+                voice_cache[name] = engine.list_voices()
+        except Exception:
+            pass
+
+def pick_surprise_voice(exclude_engines=()):
+    """A random (engine, voice_id, label) from the engines and voices that are on and ready to use.
+
+    Voices that would need a download first are skipped, and the previous pick is avoided
+    when there's anything else to choose from.
+    """
+    import random
+    candidates = []
+    for name in enabled_engines():
+        if name in exclude_engines:
+            continue
+        engine = get_engine(name)
+        try:
+            if engine.check_dependencies():
+                continue
+        except Exception:
+            continue
+        voices = voice_cache.get(name)
+        if voices is None:
+            continue  # still being listed
+        if not voices:
+            candidates.append((name, None, "default voice"))
+            continue
+        for voice_id, label in enabled_voices(name, voices):
+            try:
+                download = engine.voice_download_info(voice_id)
+            except Exception:
+                download = None
+            if download and not download["downloaded"]:
+                continue
+            candidates.append((name, voice_id, label.split(" · ")[0]))
+    if not candidates:
+        return None
+    if last_voice_used is not None and len(candidates) > 1:
+        candidates = [c for c in candidates if (c[0], c[2]) != last_voice_used] or candidates
+    return random.choice(candidates)
 
 def voice_key(engine_name, voice_id):
     return f"{engine_name}|{voice_id or ''}"
@@ -376,7 +430,7 @@ def cleanup_audio_files():
 def has_audio_file():
     """Return True if there is an audio file available for playback."""
     try:
-        file_path = get_output_path(tts_engine)
+        file_path = last_audio_file or get_output_path(tts_engine)
         return os.path.exists(file_path)
     except Exception:
         pass
@@ -536,7 +590,7 @@ def playback_position():
     now = playback_pause_start if (is_paused and playback_pause_start is not None) else time.monotonic()
     return max(0.0, now - playback_start_time - playback_pause_accum)
 
-def play_audio():
+def play_audio(file_to_play=None):
     """Play the generated audio file at the selected speed"""
     global playback_start_time, playback_pause_start, playback_pause_accum, current_audio_duration, audio_preparing
     generation = playback_generation
@@ -544,7 +598,7 @@ def play_audio():
     audio_preparing = True
     try:
         # Choose file based on engine
-        file_to_play = get_output_path(tts_engine)
+        file_to_play = file_to_play or last_audio_file or get_output_path(tts_engine)
         if not wait_for_audio_file(file_to_play, 20):
             print("⚠️ Audio file not ready for playback")
             return
@@ -669,29 +723,64 @@ def start_build(text):
     build_counter += 1
     engine_name = tts_engine
     voice = engine_voices.get(engine_name)
-    final_path = get_output_path(engine_name)
-    root, ext = os.path.splitext(final_path)
-    # Build into a private file so a cancelled or stale build never clobbers the real one.
-    temp_path = f"{root}.building{build_counter}{ext}"
+    voice_label = None
+    if surprise_voice:
+        pick = pick_surprise_voice()
+        if pick is not None:
+            engine_name, voice, voice_label = pick
+            print(f"🎲 Surprise voice: {voice_label} ({engine_name})")
+    if voice_label is None:
+        labels = dict(voice_cache.get(engine_name, []))
+        voice_label = labels.get(voice, "default voice").split(" · ")[0] if voice else "default voice"
+    surprised = surprise_voice
     results = queue.Queue()
+    # What this build is using; a surprise build can switch voices if one fails.
+    job = {}
+
+    def set_target(name, voice_id, label):
+        final = get_output_path(name)
+        root, ext = os.path.splitext(final)
+        # Build into a private file so a cancelled or stale build never clobbers the real one.
+        job.update(engine=name, voice=voice_id, label=label, final=final,
+                   temp=f"{root}.building{build_counter}{ext}")
+    set_target(engine_name, voice, voice_label)
 
     def remove_temp():
         try:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+            if os.path.exists(job["temp"]):
+                os.remove(job["temp"])
         except Exception:
             pass
 
     def worker():
+        failed = []
+        while True:
+            outcome = build_once()
+            if outcome is None or not surprised or cancel_event.is_set() or len(failed) >= 2:
+                if outcome is not None:
+                    results.put(("error", outcome))
+                return
+            # Surprise mode: try a different engine instead of giving up
+            failed.append(job["engine"])
+            remove_temp()
+            pick = pick_surprise_voice(exclude_engines=failed)
+            if pick is None:
+                results.put(("error", outcome))
+                return
+            print(f"⚠️ {job['engine']} failed ({outcome}); trying {pick[2]} ({pick[0]})")
+            results.put(("retry", f"{job['engine']} didn't work. Trying {pick[2]} ({pick[0]}) instead…"))
+            set_target(*pick)
+
+    def build_once():
+        """Build with the current target. Returns None when finished (or cancelled), else an error message."""
+        engine_name, voice, temp_path = job["engine"], job["voice"], job["temp"]
         try:
             engine = get_engine(engine_name)
             if engine is None:
-                results.put(("error", "Unknown TTS engine"))
-                return
+                return "Unknown TTS engine"
             missing_deps = engine.check_dependencies()
             if missing_deps:
-                results.put(("error", f"Missing: {', '.join(missing_deps)}"))
-                return
+                return f"Missing: {', '.join(missing_deps)}"
             download = engine.voice_download_info(voice)
             if download and not download["downloaded"]:
                 # Fetch the voice first, reporting progress to the dialog
@@ -707,13 +796,14 @@ def start_build(text):
             if cancel_event.is_set():
                 raise SynthesisCancelled()
             if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
-                results.put(("error", "Engine produced no audio"))
-                return
+                return f"{engine_name} produced no audio"
             results.put(("done", (ready, build_seconds, get_audio_duration(temp_path))))
+            return None
         except SynthesisCancelled:
             results.put(("cancelled", None))
+            return None
         except Exception as e:
-            results.put(("error", str(e)))
+            return str(e)
 
     dialog, content = themed_toplevel(control_window, "Building Audio")
     dialog.minsize(340, 0)  # wide enough for the "Downloading Voice" title
@@ -776,21 +866,32 @@ def start_build(text):
             except queue.Empty:
                 control_window.after(100, poll)
                 return
+            if status == "retry":
+                try:
+                    show_download(None)
+                    label.config(text=message, wraplength=300)
+                except tk.TclError:
+                    pass
+                continue
             if status != "progress":
                 break
             if not cancel_event.is_set():
                 show_download(message)
         finish()
+        engine_name, voice, voice_label, final_path = job["engine"], job["voice"], job["label"], job["final"]
         if status == "done" and not cancel_event.is_set():
             close_dialog()
             try:
-                os.replace(temp_path, final_path)
+                os.replace(job["temp"], final_path)
                 set_reading_text(text)
             except Exception as e:
                 print(f"Error saving audio: {e}")
                 remove_temp()
                 return
-            threading.Thread(target=play_audio, daemon=True).start()
+            global last_voice_used, last_audio_file
+            last_voice_used = (engine_name, voice_label)
+            last_audio_file = final_path
+            threading.Thread(target=play_audio, args=(final_path,), daemon=True).start()
             if message and message[0]:
                 record_speed(engine_name, voice, message[1], message[2])
                 save_settings()
@@ -803,11 +904,11 @@ def start_build(text):
             try:
                 progress.stop()
                 progress.pack_forget()
-                label.config(text=f"Error: {message}", style="Error.TLabel", wraplength=240)
+                label.config(text=f"Error: {message}", style="Error.TLabel", wraplength=300)
                 cancel_btn.config(text="Close")
             except Exception:
                 pass
-            control_window.after(2000, close_dialog)
+            control_window.after(8000, close_dialog)
         else:
             close_dialog()
 
@@ -988,6 +1089,14 @@ def apply_theme(root):
     style.configure("Treeview.Heading", background=p["button"], foreground=p["fg"], bordercolor=p["border"],
                     lightcolor=p["button"], darkcolor=p["button"], font=bold)
     style.map("Treeview.Heading", background=[("active", p["hover"])])
+    style.configure("TCheckbutton", background=p["bg"], foreground=p["fg"], focuscolor=p["bg"],
+                    indicatorbackground=p["field"], indicatorforeground=p["accent_fg"],
+                    upperbordercolor=p["border"], lowerbordercolor=p["border"], indicatormargin=(0, 0, 8, 0))
+    style.map("TCheckbutton",
+              background=[("active", p["bg"])],
+              indicatorbackground=[("selected", p["accent"]), ("active", p["hover"])],
+              upperbordercolor=[("selected", p["accent"])], lowerbordercolor=[("selected", p["accent"])],
+              foreground=[("disabled", p["disabled"])])
     style.configure("TCombobox", fieldbackground=p["field"], background=p["button"], foreground=p["fg"],
                     arrowcolor=p["fg"], bordercolor=p["border"], lightcolor=p["field"],
                     darkcolor=p["field"], padding=(6, 3))
@@ -1114,6 +1223,8 @@ def create_control_window():
                 os.remove(audio_file_wav)
         except Exception:
             pass
+        global last_audio_file
+        last_audio_file = None
         tts_engine = engine_var.get()
         save_settings()
         load_voices(tts_engine)
@@ -1263,6 +1374,8 @@ def create_control_window():
             except Exception as e:
                 print(f"Could not list voices for {engine_name}: {e}")
                 voices = []
+            if voices or not (engine and engine.check_dependencies()):
+                voice_cache[engine_name] = voices
             main_thread_calls.put(lambda: show_voices(engine_name, voices))
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1428,17 +1541,22 @@ def create_control_window():
     options_form = ttk.Frame(options_frame)
     options_form.pack(fill=tk.X)
     options_form.columnconfigure(1, weight=1)
-    ttk.Label(options_form, text="Debug").grid(row=0, column=0, sticky="w", padx=(0, 10), pady=3)
-    debug_var = tk.StringVar(value="ON" if debug_mode else "OFF")
-    debug_dropdown = ttk.Combobox(options_form, textvariable=debug_var, values=["ON", "OFF"], state="readonly", width=14)
-    debug_dropdown.grid(row=0, column=1, sticky="ew", pady=3)
-    def on_debug_select(event=None):
-        global debug_mode
-        debug_mode = (debug_var.get() == "ON")
+    surprise_var = tk.BooleanVar(value=surprise_voice)
+    def on_surprise_toggle():
+        global surprise_voice
+        surprise_voice = bool(surprise_var.get())
         save_settings()
-    debug_dropdown.bind("<<ComboboxSelected>>", on_debug_select)
+    ttk.Checkbutton(options_form, text="Surprise me with a random voice", variable=surprise_var,
+                    command=on_surprise_toggle).grid(row=0, column=0, columnspan=2, sticky="w", pady=3)
+    debug_var = tk.BooleanVar(value=debug_mode)
+    def on_debug_toggle():
+        global debug_mode
+        debug_mode = bool(debug_var.get())
+        save_settings()
+    ttk.Checkbutton(options_form, text="Debug mode", variable=debug_var,
+                    command=on_debug_toggle).grid(row=1, column=0, columnspan=2, sticky="w", pady=3)
     manage_btn = ttk.Button(options_form, text="Engines & Voices…", command=lambda: open_engine_manager())
-    manage_btn.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 3))
+    manage_btn.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 3))
 
     def refresh_engine_choices():
         """Re-apply enable/disable settings to the Engine and Voice lists."""
@@ -1988,6 +2106,8 @@ def create_control_window():
     reading_header = ttk.Frame(reading_panel)
     reading_header.pack(fill=tk.X, pady=(0, 8))
     ttk.Label(reading_header, text="Now Reading", style="Header.TLabel").pack(side=tk.LEFT)
+    voice_used_label = ttk.Label(reading_header, text="", style="Muted.TLabel")
+    voice_used_label.pack(side=tk.LEFT, padx=(10, 0))
     word_count_label = ttk.Label(reading_header, text="", style="Muted.TLabel")
     word_count_label.pack(side=tk.RIGHT)
     text_frame = ttk.Frame(reading_panel)
@@ -2054,6 +2174,9 @@ def create_control_window():
         if view_mode == "full":
             if view_state["serial"] != reading_serial:
                 show_reading_text()
+            used = f"{last_voice_used[1]} · {last_voice_used[0]}" if last_voice_used else ""
+            if voice_used_label.cget("text") != used:
+                voice_used_label.config(text=used)
             position = playback_position()
             playing = pygame.mixer.music.get_busy() or is_paused
             with reading_lock:
@@ -2319,6 +2442,9 @@ def run_tray():
 cleanup_audio_files()
 
 listener = None
+
+# List every engine's voices in the background (used by "Surprise me")
+threading.Thread(target=prefetch_voice_lists, daemon=True).start()
 
 # Start clipboard monitoring in background thread
 monitor_thread = threading.Thread(target=clipboard_monitor, daemon=True)

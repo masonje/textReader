@@ -1,7 +1,7 @@
 # Clipboard Reader
 Reads text aloud. Python version of text aloud mp3 to run on Linux, Windows, or macOS.
 
-**Version:** 1.4.0 — see [Changelog](#changelog) for what changed in each version.
+**Version:** 1.5.0 — see [Changelog](#changelog) for what changed in each version.
 
 ## Requirements
 
@@ -124,6 +124,7 @@ The main app (reader.py) only calls `get_engine()` and `synthesize()` and does n
 4. Copy the executable to your target system. Make sure ffmpeg is installed (see above).
 
 ## Features
+- **Surprise me:** tick "Surprise me with a random voice" (Full view, bottom left) and each read uses a random voice from the engines and voices you have turned on. Voices that would need a download first are skipped, and the same voice isn't picked twice in a row. The Now Reading header shows which voice was used. If the picked voice fails (for example, an online service doesn't answer), another engine is tried automatically.
 - Two views: **Compact** (just the controls, small enough to leave on screen) and **Full** (adds a panel showing the text being read, with the current word highlighted). Switch with the Full View ▸ / ◂ Compact button.
 - Reads clipboard text aloud
 - Adjustable playback speed (0.5x–2x)
@@ -142,6 +143,7 @@ Settings are saved in `~/.textReader/settings.json`. The control window includes
 	"theme": "auto",
 	"view_mode": "compact",
 	"full_window_size": "",
+	"surprise_voice": false,
 	"hotkeys": {
 		"read_selected_text": "Win+Esc",
 		"play": "Win+Shift+R",
@@ -175,6 +177,14 @@ In testing with gTTS, sentence starts landed within about 0.1 s of the real audi
 ## Changelog
 
 The version number is also stored in `__version__` at the top of `reader.py`.
+
+### 1.5.0 — 2026-11-13
+- **Added:** "Surprise me with a random voice" checkbox (Full view options, above Debug). Each read picks a random voice from the engines and voices that are on and ready (no downloads), avoiding an immediate repeat. Saved as `surprise_voice`.
+- **Added:** The Now Reading header shows the voice and engine used for the current read.
+- **Added:** If a surprise voice fails, the app tries a voice from a different engine (up to two more) and says so in the dialog.
+- **Changed:** Debug is now a checkbox instead of an ON/OFF drop-down.
+- **Fixed:** gTTS could fail with "Engine produced no audio" when Google sent back an empty reply (usually while it's limiting requests). gTTS now retries once, then explains what happened. Error messages stay up for 8 seconds instead of 2.
+- **Fixed:** Play replays the last read even when it used a different engine than the one selected.
 
 ### 1.4.0 — 2026-11-13
 - **Added:** Download progress for voices. When a read needs a voice that isn't downloaded yet, the Building dialog shows "Downloading voice: 21.3 of 63 MB (34%)" with a progress bar before it builds.
