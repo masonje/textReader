@@ -137,7 +137,7 @@ None of the TTS engines report when each word is spoken, so [word_timing.py](wor
 In testing with gTTS, sentence starts landed within about 0.1 s of the real audio. Within a sentence, the highlight is an estimate and can run slightly ahead of or behind the voice.
 
 ## Checking the Version
-- The control window shows the version in its title bar and at the bottom of the window.
+- The Compact view shows the version at the bottom of the window.
 - From a terminal: `reader --version` (or `python reader.py --version`).
 
 ## Keyboard Shortcuts
@@ -153,6 +153,11 @@ The version number is also stored in `__version__` at the top of `reader.py`.
 ### 1.2.0 — 2026-11-12
 - **Added:** Compact and Full views. Compact is the existing control window. Full adds a resizable "Now Reading" panel that shows the text being read aloud, highlights the current word, dims words already read, scrolls to follow along, and shows "Word N of M". The view and the Full window size are remembered.
 - **Added:** `word_timing.py` estimates word timings from the text and the pauses in the audio.
+- **Added:** A play timer (elapsed / total, e.g. `0:08 / 1:47`) at the top right of the progress bar.
+- **Changed:** The window title is just "Clipboard Reader". The version shows only at the bottom of the Compact view.
+- **Fixed:** Reading could be impossible to stop. Stop stayed greyed out until audio actually started, which can take 20 seconds or more for long text. Stop pressed while audio was being slowed down (speeds below 1.0x) was ignored, and reading started anyway. Stop is now available, and the status shows "Building audio…" or "Preparing audio…", for the whole time. Stop always wins over audio that's still being prepared.
+- **Fixed:** Shortcuts using Ctrl never fired, because with Ctrl held X reports a control character instead of the letter.
+- **Fixed:** An error inside a hotkey handler could stop the keyboard listener and silently disable every hotkey until restart. Handlers now catch errors, and a watchdog restarts the listener if it ever stops.
 - **Fixed:** Pressing Play while paused restarted from the beginning instead of resuming, because pygame reports "not busy" while paused. Resuming also kept the time spent paused, which threw off the progress bar.
 
 ### 1.1.0 — 2026-11-12

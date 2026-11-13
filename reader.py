@@ -53,7 +53,7 @@ from tkinter import ttk
 from tkinter import messagebox
 import tkinter.font as tkfont
 from tts_engines import get_engine, list_engines
-from tts_engines.base import SynthesisCancelled
+from tts_engines.base import SynthesisCancelled, run_cancellable
 import word_timing
 
 # Initialize pygame mixer for audio playback
@@ -224,6 +224,11 @@ reading_spans = []      # (start, end) character offsets per word
 reading_timeline = []   # estimated start time (s) per word
 reading_serial = 0
 reading_lock = threading.Lock()
+
+# Bumped by Stop; a playback thread that sees a newer generation gives up
+# instead of starting audio after the user already pressed Stop.
+playback_generation = 0
+audio_preparing = False  # True while audio is being converted for playback
 playback_start_time = None
 playback_pause_start = None
 playback_pause_accum = 0.0
@@ -314,7 +319,15 @@ def key_name_for(key):
         if key == getattr(keyboard.Key, key_attr, None):
             return key_name
     if hasattr(key, 'char') and key.char:
-        return key.char.lower()
+        char = key.char
+        # With Ctrl held, X reports control characters (Ctrl+Z -> "\x1a"); use the key itself
+        if len(char) == 1 and ord(char) < 32:
+            vk = getattr(key, 'vk', None)
+            if vk and 32 < vk < 127:
+                return chr(vk).lower()
+            if 1 <= ord(char) <= 26:
+                return chr(ord(char) + 96)
+        return char.lower()
     if hasattr(key, 'name') and key.name:
         return normalize_hotkey_part(key.name)
     return None
@@ -436,34 +449,49 @@ def playback_position():
 
 def play_audio():
     """Play the generated audio file at the selected speed"""
-    global playback_start_time, playback_pause_start, playback_pause_accum, current_audio_duration
+    global playback_start_time, playback_pause_start, playback_pause_accum, current_audio_duration, audio_preparing
+    generation = playback_generation
+    stopped = lambda: generation != playback_generation or not is_running
+    audio_preparing = True
     try:
         # Choose file based on engine
         file_to_play = get_output_path(tts_engine)
         if not wait_for_audio_file(file_to_play, 20):
             print("⚠️ Audio file not ready for playback")
             return
-        pygame.mixer.music.load(file_to_play)
         # Adjust speed for MP3 only
         if playback_speed != 1.0 and tts_engine == "gTTS":
-            import subprocess
             temp_speed_file = str(SETTINGS_DIR / "clipboard_speech_speed.mp3")
-            subprocess.run([
-                "ffmpeg", "-y", "-i", audio_file_mp3,
-                "-filter:a", f"atempo={playback_speed}", temp_speed_file
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            pygame.mixer.music.load(temp_speed_file)
-            file_to_play = temp_speed_file
+            try:
+                run_cancellable(
+                    ["ffmpeg", "-y", "-loglevel", "error", "-i", file_to_play,
+                     "-filter:a", f"atempo={playback_speed}", temp_speed_file],
+                    cancel_check=stopped,
+                )
+                file_to_play = temp_speed_file
+            except SynthesisCancelled:
+                return
+            except Exception as e:
+                print(f"⚠️ Speed change failed, playing at normal speed: {e}")
+        if stopped():
+            return  # Stop was pressed while the audio was being prepared
+        pygame.mixer.music.load(file_to_play)
+        current_audio_duration = get_audio_duration(file_to_play)
+        if stopped():
+            return
         playback_start_time = time.monotonic()
         playback_pause_start = None
         playback_pause_accum = 0.0
-        current_audio_duration = get_audio_duration(file_to_play)
         pygame.mixer.music.play()
+        audio_preparing = False
         update_reading_timeline(file_to_play, current_audio_duration)
-        while pygame.mixer.music.get_busy() and is_running and not is_paused:
+        while pygame.mixer.music.get_busy() and is_running and not is_paused and not stopped():
             time.sleep(0.1)
     except Exception as e:
         print(f"Error playing audio: {e}")
+    finally:
+        if generation == playback_generation:
+            audio_preparing = False
 
 def on_play():
     """Resume/play reading"""
@@ -515,6 +543,9 @@ def on_pause():
 def on_stop():
     """Stop and reset playback"""
     global is_paused, playback_start_time, playback_pause_start, playback_pause_accum, current_audio_duration, current_progress
+    global playback_generation, audio_preparing
+    playback_generation += 1
+    audio_preparing = False
     is_paused = False
     playback_start_time = None
     playback_pause_start = None
@@ -877,7 +908,7 @@ def themed_toplevel(parent, title):
 def create_control_window():
     global control_window, playback_speed, hotkeys
     window = tk.Tk(className="reader")
-    window.title(f"Clipboard Reader v{__version__}")
+    window.title("Clipboard Reader")
     window.resizable(False, False)
     apply_theme(window)
 
@@ -975,8 +1006,32 @@ def create_control_window():
     ttk.Separator(content).pack(fill=tk.X, pady=(12, 10))
 
     # Status and playback progress
-    status_label = ttk.Label(content, text="Running", style="Header.TLabel")
-    status_label.pack(anchor="w")
+    status_row = ttk.Frame(content)
+    status_row.pack(fill=tk.X)
+    status_label = ttk.Label(status_row, text="Running", style="Header.TLabel")
+    status_label.pack(side=tk.LEFT)
+    time_label = ttk.Label(status_row, text="", style="Muted.TLabel")
+    time_label.pack(side=tk.RIGHT)
+
+    def format_time(seconds):
+        seconds = int(max(0, seconds))
+        h, rem = divmod(seconds, 3600)
+        m, sec = divmod(rem, 60)
+        return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+    def update_time_label():
+        try:
+            if not window.winfo_exists():
+                return
+        except Exception:
+            return
+        position = playback_position()
+        if position is not None and (pygame.mixer.music.get_busy() or is_paused) and current_audio_duration > 0:
+            position = min(position, current_audio_duration)
+            time_label.config(text=f"{format_time(position)} / {format_time(current_audio_duration)}")
+        else:
+            time_label.config(text="")
+        window.after(250, update_time_label)
     progress_var = tk.DoubleVar(value=0.0)
     progress_bar = ttk.Progressbar(content, orient=tk.HORIZONTAL, mode="determinate", maximum=100, variable=progress_var)
     progress_bar.pack(fill=tk.X, pady=(6, 12))
@@ -1156,6 +1211,11 @@ def create_control_window():
 
     def apply_view_mode(remember_size=True):
         global full_window_size
+        # The version footer belongs to the compact view only
+        if view_mode == "full":
+            version_label.pack_forget()
+        elif not version_label.winfo_ismapped():
+            version_label.pack(pady=(12, 0))
         width, height = compact_size()
         if view_mode == "full":
             # Controls keep their natural width; the reading panel takes the rest
@@ -1237,7 +1297,12 @@ def create_control_window():
             status_label.config(text="Missing dependencies")
             window.after(500, update_status)
             return
-        if pygame.mixer.music.get_busy() or is_paused:
+        busy_preparing = current_build is not None or audio_preparing
+        if busy_preparing and not pygame.mixer.music.get_busy() and not is_paused:
+            status_label.config(text="Building audio…" if current_build is not None else "Preparing audio…")
+            speed_slider.state(["disabled"])
+            progress_var.set(0.0)
+        elif pygame.mixer.music.get_busy() or is_paused:
             if is_paused:
                 status_label.config(text="Paused")
             else:
@@ -1264,12 +1329,14 @@ def create_control_window():
             stop_btn.state(["!disabled"])
         else:
             pause_btn.state(["disabled"])
-            stop_btn.state(["disabled"])
+            # Stop stays available while audio is being built or prepared, so it can always be cancelled
+            stop_btn.state(["!disabled"] if busy_preparing else ["disabled"])
         try:
             window.after(500, update_status)
         except Exception:
             pass
     update_status()
+    update_time_label()
     def on_close():
         global is_running, full_window_size
         is_running = False
@@ -1325,10 +1392,13 @@ def on_press(key):
             combo = parse_hotkey(hotkeys.get(action, DEFAULT_HOTKEYS[action]))
             if combo and combo.issubset(pressed_keys) and action not in active_hotkeys:
                 active_hotkeys.add(action)
+                if debug_mode:
+                    print(f"🐛 [DEBUG] Hotkey: {action} (keys held: {sorted(pressed_keys)})")
                 trigger_hotkey(action)
                 break
-    except AttributeError:
-        pass
+    except Exception as e:
+        # An exception here would stop the pynput listener and kill every hotkey
+        print(f"Hotkey error: {e}")
 
 def on_release(key):
     """Handle keyboard release events"""
@@ -1345,8 +1415,8 @@ def on_release(key):
             combo = parse_hotkey(hotkeys.get(action, DEFAULT_HOTKEYS[action]))
             if not combo or not combo.issubset(pressed_keys):
                 active_hotkeys.discard(action)
-    except AttributeError:
-        pass
+    except Exception as e:
+        print(f"Hotkey error: {e}")
 
 def setup_hotkeys():
     """Setup keyboard listener for control"""
@@ -1356,14 +1426,22 @@ def setup_hotkeys():
 
 def clipboard_monitor():
     """Monitor clipboard and speak new content"""
-    global is_running, is_paused
-    
+    global is_running, is_paused, listener
+
     while is_running:
         try:
             # Short pause to prevent high CPU usage
             time.sleep(0.5)
+            # If the keyboard listener ever dies, start a new one so hotkeys keep working
+            if is_running and listener is not None and not listener.is_alive():
+                print("⚠️ Hotkey listener stopped; restarting it")
+                pressed_keys.clear()
+                active_hotkeys.clear()
+                listener = setup_hotkeys()
         except KeyboardInterrupt:
             break
+        except Exception as e:
+            print(f"Error: {e}")
 
 def run_tray():
     """Run the system tray icon (display only, no menu)"""
@@ -1381,6 +1459,8 @@ def run_tray():
 
 # Remove any leftover audio files from previous runs
 cleanup_audio_files()
+
+listener = None
 
 # Start clipboard monitoring in background thread
 monitor_thread = threading.Thread(target=clipboard_monitor, daemon=True)

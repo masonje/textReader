@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 import threading
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import Callable, List, Optional, Sequence
 
 
 class SynthesisCancelled(Exception):
@@ -38,8 +38,10 @@ def run_cancellable(
     cancel_event: Optional[threading.Event] = None,
     input_text: Optional[str] = None,
     timeout: float = 60.0,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> None:
-    """Run an external command, killing it if `cancel_event` is set.
+    """Run an external command, killing it if `cancel_event` is set
+    (or `cancel_check()` returns True).
 
     Raises SynthesisCancelled on cancel and subprocess.TimeoutExpired on timeout.
     """
@@ -68,7 +70,7 @@ def run_cancellable(
             return
         except subprocess.TimeoutExpired:
             waited += step
-        if cancel_event is not None and cancel_event.is_set():
+        if (cancel_event is not None and cancel_event.is_set()) or (cancel_check is not None and cancel_check()):
             proc.kill()
             proc.wait()
             raise SynthesisCancelled()
