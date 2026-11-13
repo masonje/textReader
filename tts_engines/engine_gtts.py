@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Dict, List, Optional
 
 from .base import SynthesisCancelled, TTSEngine, Voice
@@ -57,9 +58,23 @@ class GTTSEngine(TTSEngine):
         from gtts import gTTS
 
         tts = gTTS(text=text, lang="en", tld=voice or "com", slow=False)
-        # gTTS fetches audio one text chunk at a time; check for cancel between chunks.
-        with open(output_path, "wb") as f:
-            for chunk in tts.stream():
-                if cancel_event is not None and cancel_event.is_set():
-                    raise SynthesisCancelled()
-                f.write(chunk)
+        # Google sometimes answers without any audio (usually when it's limiting requests).
+        # gTTS doesn't treat that as an error, so check, and retry once after a short pause.
+        for attempt in range(2):
+            written = 0
+            # gTTS fetches audio one text chunk at a time; check for cancel between chunks.
+            with open(output_path, "wb") as f:
+                for chunk in tts.stream():
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise SynthesisCancelled()
+                    f.write(chunk)
+                    written += len(chunk)
+            if written:
+                return
+            if attempt == 0:
+                for _ in range(15):
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise SynthesisCancelled()
+                    time.sleep(0.1)
+        raise RuntimeError("Google's text-to-speech sent back no audio. It may be limiting requests for "
+                           "a few minutes; try again shortly or use another engine.")
