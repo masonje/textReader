@@ -1158,6 +1158,8 @@ def create_control_window():
         global full_window_size
         width, height = compact_size()
         if view_mode == "full":
+            # Controls keep their natural width; the reading panel takes the rest
+            content.pack_configure(fill=tk.Y, expand=False)
             divider.pack(side=tk.LEFT, fill=tk.Y)
             reading_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
             window.resizable(True, True)
@@ -1170,6 +1172,8 @@ def create_control_window():
                 full_window_size = f"{window.winfo_width()}x{window.winfo_height()}"
             reading_panel.pack_forget()
             divider.pack_forget()
+            # Controls stretch across the whole window so the margins are even
+            content.pack_configure(fill=tk.BOTH, expand=True)
             window.minsize(width, height)
             window.geometry(f"{width}x{height}")
             window.resizable(False, False)
