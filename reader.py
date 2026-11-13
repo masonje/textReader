@@ -1,5 +1,5 @@
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # Dependency check
 import sys
@@ -54,6 +54,7 @@ from tkinter import messagebox
 import tkinter.font as tkfont
 from tts_engines import get_engine, list_engines
 from tts_engines.base import SynthesisCancelled
+import word_timing
 
 # Initialize pygame mixer for audio playback
 pygame.mixer.init()
@@ -165,6 +166,8 @@ def default_settings():
         "tts_engine": "gTTS",
         "hotkeys": DEFAULT_HOTKEYS.copy(),
         "theme": "auto",
+        "view_mode": "compact",
+        "full_window_size": "",
     }
 
 def normalize_loaded_hotkeys(raw_hotkeys):
@@ -191,7 +194,7 @@ def load_settings():
 def save_settings():
     try:
         with open(SETTINGS_FILE, "w") as f:
-            json.dump({"debug_mode": debug_mode, "playback_speed": playback_speed, "tts_engine": tts_engine, "hotkeys": hotkeys, "theme": ui_theme}, f, indent=2)
+            json.dump({"debug_mode": debug_mode, "playback_speed": playback_speed, "tts_engine": tts_engine, "hotkeys": hotkeys, "theme": ui_theme, "view_mode": view_mode, "full_window_size": full_window_size}, f, indent=2)
     except Exception:
         pass
 
@@ -211,6 +214,16 @@ playback_speed = settings.get("playback_speed", 1.0)
 tts_engine = settings.get("tts_engine", "gTTS")
 hotkeys = settings.get("hotkeys", DEFAULT_HOTKEYS.copy())
 ui_theme = settings.get("theme", "auto")  # "auto" follows the desktop, or "dark" / "light"
+view_mode = settings.get("view_mode", "compact")  # "compact" (controls only) or "full"
+full_window_size = settings.get("full_window_size", "")  # "WxH" remembered for full mode
+
+# What is being read aloud, for the full view. reading_serial changes whenever
+# the text changes so the UI knows to reload it.
+reading_text = ""
+reading_spans = []      # (start, end) character offsets per word
+reading_timeline = []   # estimated start time (s) per word
+reading_serial = 0
+reading_lock = threading.Lock()
 playback_start_time = None
 playback_pause_start = None
 playback_pause_accum = 0.0
@@ -385,6 +398,42 @@ def get_audio_duration(file_path):
     except Exception:
         return 0.0
 
+def set_reading_text(text):
+    """Record the text that is about to be read aloud (any thread)."""
+    global reading_text, reading_spans, reading_timeline, reading_serial
+    with reading_lock:
+        reading_text = text
+        reading_spans = word_timing.tokenize(text)
+        reading_timeline = []
+        reading_serial += 1
+
+def update_reading_timeline(audio_path, duration):
+    """Estimate when each word is spoken in `audio_path` (call from a worker thread)."""
+    global reading_timeline
+    with reading_lock:
+        text, spans, serial = reading_text, reading_spans, reading_serial
+    if not spans or duration <= 0:
+        return
+    # A quick even spread first, so highlighting starts at once...
+    rough = word_timing.build_timeline(text, duration, [], spans)
+    with reading_lock:
+        if serial == reading_serial:
+            reading_timeline = rough
+    # ...then refine it using the pauses actually found in the audio
+    refined = word_timing.build_timeline(text, duration, word_timing.detect_silences(audio_path), spans)
+    with reading_lock:
+        if serial == reading_serial:
+            reading_timeline = refined
+    if debug_mode:
+        print(f"🐛 [DEBUG] Word timeline ready: {len(refined)} words over {duration:.1f}s")
+
+def playback_position():
+    """Seconds of audio played so far, or None when nothing is loaded."""
+    if playback_start_time is None:
+        return None
+    now = playback_pause_start if (is_paused and playback_pause_start is not None) else time.monotonic()
+    return max(0.0, now - playback_start_time - playback_pause_accum)
+
 def play_audio():
     """Play the generated audio file at the selected speed"""
     global playback_start_time, playback_pause_start, playback_pause_accum, current_audio_duration
@@ -410,6 +459,7 @@ def play_audio():
         playback_pause_accum = 0.0
         current_audio_duration = get_audio_duration(file_to_play)
         pygame.mixer.music.play()
+        update_reading_timeline(file_to_play, current_audio_duration)
         while pygame.mixer.music.get_busy() and is_running and not is_paused:
             time.sleep(0.1)
     except Exception as e:
@@ -417,12 +467,16 @@ def play_audio():
 
 def on_play():
     """Resume/play reading"""
-    global is_paused
-    
-    if is_paused and pygame.mixer.music.get_busy():
+    global is_paused, playback_pause_start, playback_pause_accum
+
+    if is_paused and playback_start_time is not None:
         # Resume paused playback from where it left off
+        # (pygame reports get_busy() == False while paused, so check our own state)
         pygame.mixer.music.unpause()
         is_paused = False
+        if playback_pause_start is not None:
+            playback_pause_accum += time.monotonic() - playback_pause_start
+            playback_pause_start = None
         print("▶ Resumed from pause")
     else:
         # Start fresh playback from beginning, honoring speed
@@ -573,6 +627,7 @@ def start_build(text):
             close_dialog()
             try:
                 os.replace(temp_path, final_path)
+                set_reading_text(text)
             except Exception as e:
                 print(f"Error saving audio: {e}")
                 remove_temp()
@@ -787,6 +842,14 @@ def apply_theme(root):
     style.configure("Horizontal.TScale", background=p["button"], troughcolor=p["field"],
                     bordercolor=p["border"], lightcolor=p["button"], darkcolor=p["button"])
     style.map("Horizontal.TScale", background=[("disabled", p["surface"]), ("active", p["hover"])])
+    style.configure("Vertical.TScrollbar", background=p["button"], troughcolor=p["field"],
+                    bordercolor=p["field"], lightcolor=p["button"], darkcolor=p["button"],
+                    arrowcolor=p["fg"], gripcount=0)
+    style.map("Vertical.TScrollbar", background=[("active", p["hover"])],
+              lightcolor=[("active", p["hover"])], darkcolor=[("active", p["hover"])])
+    style.configure("TSeparator", background=p["border"])
+    _theme_fonts["reading"] = reading = default_font.copy()
+    reading.configure(size=13)
     style.configure("Horizontal.TProgressbar", background=p["accent"], troughcolor=p["field"],
                     bordercolor=p["border"], lightcolor=p["accent"], darkcolor=p["accent"], thickness=8)
 
@@ -833,7 +896,7 @@ def create_control_window():
             pass
 
     content = ttk.Frame(window, padding=(16, 14, 16, 8))
-    content.pack(fill=tk.BOTH, expand=True)
+    content.pack(side=tk.LEFT, fill=tk.Y)
 
     # Settings form: label column + control column, aligned
     form = ttk.Frame(content)
@@ -997,14 +1060,130 @@ def create_control_window():
         dialog.bind("<Escape>", lambda _e: dialog.destroy())
 
     shortcuts_btn = ttk.Button(button_frame, text="Shortcuts…", command=open_shortcut_preferences)
-    shortcuts_btn.grid(row=3, column=0, columnspan=2, pady=(3, 0), sticky="ew")
+    shortcuts_btn.grid(row=3, column=0, padx=(0, 4), pady=(3, 0), sticky="ew")
+    mode_btn = ttk.Button(button_frame, text="Full View ▸")
+    mode_btn.grid(row=3, column=1, padx=(4, 0), pady=(3, 0), sticky="ew")
 
     version_label = ttk.Label(content, text=f"Version {__version__}", style="Muted.TLabel")
     version_label.pack(pady=(12, 0))
 
-    # Wide enough that the title bar shows the full name and version
-    window.update_idletasks()
-    window.minsize(max(window.winfo_reqwidth(), 320), window.winfo_reqheight())
+    # ---- Full view: the text being read, with the current word highlighted
+    p = PALETTE
+    divider = ttk.Separator(window, orient=tk.VERTICAL)
+    reading_panel = ttk.Frame(window, padding=(14, 14, 16, 12))
+    reading_header = ttk.Frame(reading_panel)
+    reading_header.pack(fill=tk.X, pady=(0, 8))
+    ttk.Label(reading_header, text="Now Reading", style="Header.TLabel").pack(side=tk.LEFT)
+    word_count_label = ttk.Label(reading_header, text="", style="Muted.TLabel")
+    word_count_label.pack(side=tk.RIGHT)
+    text_frame = ttk.Frame(reading_panel)
+    text_frame.pack(fill=tk.BOTH, expand=True)
+    reading_view = tk.Text(
+        text_frame, wrap=tk.WORD, font=_theme_fonts["reading"], relief=tk.FLAT, borderwidth=0,
+        background=p["field"], foreground=p["fg"], insertbackground=p["fg"],
+        selectbackground=p["accent"], selectforeground=p["accent_fg"],
+        highlightthickness=1, highlightbackground=p["border"], highlightcolor=p["border"],
+        padx=14, pady=12, spacing1=2, spacing2=4, spacing3=6, cursor="arrow",
+        width=46, height=14,
+    )
+    reading_scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=reading_view.yview)
+    reading_view.configure(yscrollcommand=reading_scroll.set)
+    reading_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    reading_view.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    reading_view.tag_configure("placeholder", foreground=p["muted"])
+    reading_view.tag_configure("spoken", foreground=p["muted"])
+    reading_view.tag_configure("current", background=p["accent"], foreground=p["accent_fg"])
+    reading_view.configure(state=tk.DISABLED)
+
+    view_state = {"serial": None, "word": None}
+
+    def show_reading_text():
+        with reading_lock:
+            text, serial, count = reading_text, reading_serial, len(reading_spans)
+        reading_view.configure(state=tk.NORMAL)
+        reading_view.delete("1.0", tk.END)
+        if text:
+            reading_view.insert("1.0", text)
+        else:
+            reading_view.insert("1.0", "Text appears here while it's read aloud, "
+                                       "with the current word highlighted.", "placeholder")
+        reading_view.configure(state=tk.DISABLED)
+        reading_view.yview_moveto(0)
+        word_count_label.config(text=f"{count} words" if count else "")
+        view_state["serial"] = serial
+        view_state["word"] = None
+
+    def highlight_word(index):
+        """Highlight word `index` (-1 for none) and dim the words already spoken."""
+        if index == view_state["word"]:
+            return
+        view_state["word"] = index
+        reading_view.tag_remove("current", "1.0", tk.END)
+        reading_view.tag_remove("spoken", "1.0", tk.END)
+        with reading_lock:
+            spans = reading_spans
+        if 0 <= index < len(spans):
+            start, end = spans[index]
+            reading_view.tag_add("spoken", "1.0", f"1.0+{start}c")
+            reading_view.tag_add("current", f"1.0+{start}c", f"1.0+{end}c")
+            reading_view.see(f"1.0+{end}c")
+            word_count_label.config(text=f"Word {index + 1} of {len(spans)}")
+        elif spans:
+            word_count_label.config(text=f"{len(spans)} words")
+
+    def update_reading_view():
+        try:
+            if not window.winfo_exists():
+                return
+        except Exception:
+            return
+        if view_mode == "full":
+            if view_state["serial"] != reading_serial:
+                show_reading_text()
+            position = playback_position()
+            playing = pygame.mixer.music.get_busy() or is_paused
+            with reading_lock:
+                timeline = reading_timeline
+            if playing and position is not None and timeline:
+                highlight_word(max(0, word_timing.word_at(timeline, position)))
+            elif not playing:
+                highlight_word(-1)
+        window.after(80, update_reading_view)
+
+    def compact_size():
+        content.update_idletasks()
+        return max(content.winfo_reqwidth(), 320), content.winfo_reqheight()
+
+    def apply_view_mode(remember_size=True):
+        global full_window_size
+        width, height = compact_size()
+        if view_mode == "full":
+            divider.pack(side=tk.LEFT, fill=tk.Y)
+            reading_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            window.resizable(True, True)
+            window.minsize(width + 320, height)
+            window.geometry(full_window_size or f"{width + 520}x{max(height, 460)}")
+            mode_btn.config(text="◂ Compact")
+            show_reading_text()
+        else:
+            if remember_size and window.winfo_ismapped() and reading_panel.winfo_ismapped():
+                full_window_size = f"{window.winfo_width()}x{window.winfo_height()}"
+            reading_panel.pack_forget()
+            divider.pack_forget()
+            window.minsize(width, height)
+            window.geometry(f"{width}x{height}")
+            window.resizable(False, False)
+            mode_btn.config(text="Full View ▸")
+
+    def toggle_view_mode():
+        global view_mode
+        view_mode = "compact" if view_mode == "full" else "full"
+        apply_view_mode()
+        save_settings()
+
+    mode_btn.config(command=toggle_view_mode)
+    apply_view_mode(remember_size=False)
+    update_reading_view()
 
     def set_controls_state(disabled: bool):
         try:
@@ -1088,8 +1267,14 @@ def create_control_window():
             pass
     update_status()
     def on_close():
-        global is_running
+        global is_running, full_window_size
         is_running = False
+        try:
+            if view_mode == "full":
+                full_window_size = f"{window.winfo_width()}x{window.winfo_height()}"
+                save_settings()
+        except Exception:
+            pass
         try:
             if tray_icon:
                 tray_icon.stop()
