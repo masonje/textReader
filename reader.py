@@ -1109,6 +1109,23 @@ def create_control_window():
     mode_btn = ttk.Button(button_frame, text="Full View ▸")
     mode_btn.grid(row=3, column=1, padx=(4, 0), pady=(3, 0), sticky="ew")
 
+    # Options area: bottom of the left column, shown only in the full view.
+    # Add future settings as more rows in options_form.
+    options_frame = ttk.Frame(content)
+    ttk.Separator(options_frame).pack(fill=tk.X, pady=(0, 10))
+    options_form = ttk.Frame(options_frame)
+    options_form.pack(fill=tk.X)
+    options_form.columnconfigure(1, weight=1)
+    ttk.Label(options_form, text="Debug").grid(row=0, column=0, sticky="w", padx=(0, 10), pady=3)
+    debug_var = tk.StringVar(value="ON" if debug_mode else "OFF")
+    debug_dropdown = ttk.Combobox(options_form, textvariable=debug_var, values=["ON", "OFF"], state="readonly", width=14)
+    debug_dropdown.grid(row=0, column=1, sticky="ew", pady=3)
+    def on_debug_select(event=None):
+        global debug_mode
+        debug_mode = (debug_var.get() == "ON")
+        save_settings()
+    debug_dropdown.bind("<<ComboboxSelected>>", on_debug_select)
+
     version_label = ttk.Label(content, text=f"Version {__version__}", style="Muted.TLabel")
     version_label.pack(pady=(12, 0))
 
@@ -1121,19 +1138,6 @@ def create_control_window():
     ttk.Label(reading_header, text="Now Reading", style="Header.TLabel").pack(side=tk.LEFT)
     word_count_label = ttk.Label(reading_header, text="", style="Muted.TLabel")
     word_count_label.pack(side=tk.RIGHT)
-    # Footer (full view only): Debug setting
-    reading_footer = ttk.Frame(reading_panel)
-    reading_footer.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
-    ttk.Label(reading_footer, text="Debug").pack(side=tk.LEFT, padx=(0, 8))
-    debug_var = tk.StringVar(value="ON" if debug_mode else "OFF")
-    debug_dropdown = ttk.Combobox(reading_footer, textvariable=debug_var, values=["ON", "OFF"], state="readonly", width=6)
-    debug_dropdown.pack(side=tk.LEFT)
-    def on_debug_select(event=None):
-        global debug_mode
-        debug_mode = (debug_var.get() == "ON")
-        save_settings()
-    debug_dropdown.bind("<<ComboboxSelected>>", on_debug_select)
-
     text_frame = ttk.Frame(reading_panel)
     text_frame.pack(fill=tk.BOTH, expand=True)
     reading_view = tk.Text(
@@ -1214,10 +1218,12 @@ def create_control_window():
 
     def apply_view_mode(remember_size=True):
         global full_window_size
-        # The version footer belongs to the compact view only
+        # Compact shows the version footer; full shows the options area instead
         if view_mode == "full":
             version_label.pack_forget()
-        elif not version_label.winfo_ismapped():
+            options_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(12, 0))
+        else:
+            options_frame.pack_forget()
             version_label.pack(pady=(12, 0))
         width, height = compact_size()
         if view_mode == "full":

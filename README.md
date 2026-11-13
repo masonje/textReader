@@ -155,7 +155,7 @@ The version number is also stored in `__version__` at the top of `reader.py`.
 - **Added:** `word_timing.py` estimates word timings from the text and the pauses in the audio.
 - **Added:** A play timer (elapsed / total, e.g. `0:08 / 1:47`) at the top right of the progress bar.
 - **Changed:** The window title is just "Clipboard Reader". The version shows only at the bottom of the Compact view.
-- **Changed:** The Debug setting moved to the bottom of the Full view and is hidden in the Compact view, which keeps Compact smaller.
+- **Changed:** Settings such as Debug moved to an options area at the bottom of the Full view's left column, where future options will go too. It's hidden in the Compact view, which keeps Compact smaller.
 - **Fixed:** Reading could be impossible to stop. Stop stayed greyed out until audio actually started, which can take 20 seconds or more for long text. Stop pressed while audio was being slowed down (speeds below 1.0x) was ignored, and reading started anyway. Stop is now available, and the status shows "Building audio…" or "Preparing audio…", for the whole time. Stop always wins over audio that's still being prepared.
 - **Fixed:** Shortcuts using Ctrl never fired, because with Ctrl held X reports a control character instead of the letter.
 - **Fixed:** An error inside a hotkey handler could stop the keyboard listener and silently disable every hotkey until restart. Handlers now catch errors, and a watchdog restarts the listener if it ever stops.
