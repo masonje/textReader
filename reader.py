@@ -288,7 +288,7 @@ def generated_where(engine, long=False):
         return f"Online ({who})" if engine.service else "Online"
     if long:
         return "Locally, on this computer. Nothing you read is sent anywhere."
-    return "This computer"
+    return "Locally"
 
 def stars(rating):
     rating = max(0, min(5, int(round(rating))))
