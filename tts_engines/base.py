@@ -34,6 +34,20 @@ class TTSEngine:
         """
         return []
 
+    # --- Optional: engines the app can install for the user -------------------
+    install_note: str = ""  # shown when asking the user whether to install
+
+    def can_install(self) -> bool:
+        """True if install() can set up this engine's missing dependencies."""
+        return False
+
+    def install(self, log: Callable[[str], None], cancel_event: threading.Event) -> None:
+        """Install missing dependencies, reporting progress lines through `log`.
+
+        Raise SynthesisCancelled if `cancel_event` is set, or another exception on failure.
+        """
+        raise NotImplementedError()
+
     def synthesize(
         self,
         text: str,

@@ -16,7 +16,7 @@ Reads text aloud. Python version of text aloud mp3 to run on Linux, Windows, or 
 	- pystray
 	- Pillow
 	- pynput
-	- coqui-tts (optional, for Coqui TTS; not in requirements.txt because it installs PyTorch, several GB)
+	- coqui-tts (optional, for Coqui TTS; not in requirements.txt because it needs PyTorch. The app can install it for you, see below.)
 
 - ffmpeg (for audio speed control)
 - espeak-ng (for eSpeak-NG engine)
@@ -72,7 +72,9 @@ Pick the engine and voice in the control window. Each engine remembers its own v
 | [pyttsx3](tts_engines/engine_pyttsx3.py) | The system's speech voices (eSpeak on Linux, SAPI on Windows, NSSpeech on macOS) | Robotic on Linux | — |
 | [eSpeak-NG](tts_engines/engine_espeak.py) | English accents, plus female variants of US and UK English | Robotic | `espeak-ng` |
 | [Festival](tts_engines/engine_festival.py) | Installed Festival voices (e.g. `festvox-kallpc16k`) | Robotic | `festival` |
-| [Coqui TTS](tts_engines/engine_coqui.py) | One voice (Tacotron2) | Neural, slow on CPU | Optional: `pip install coqui-tts` (installs PyTorch) |
+| [Coqui TTS](tts_engines/engine_coqui.py) | One voice (Tacotron2) | Neural, slow on CPU | Installed on request, about 1 GB (see below) |
+
+**Installing Coqui TTS:** pick Coqui TTS as the engine and the app offers to install it. It creates a private Python environment in `~/.textReader/engines/coqui` and installs CPU-only PyTorch and Coqui there (about 1 GB, several minutes). It shows the progress, and you can cancel. Coqui then runs in a background worker process that keeps the model loaded between reads. To remove it, delete `~/.textReader/engines`. If you run from source and have `coqui-tts` installed in the app's own environment, that is used instead.
 
 Run `reader --check-engines` (or `python reader.py --check-engines`) to see which engines work and try each one.
 
@@ -171,7 +173,8 @@ The version number is also stored in `__version__` at the top of `reader.py`.
 - **Added:** `--check-engines` reports which engines work and tests each one.
 - **Fixed:** pyttsx3 wasn't installed and failed with "Engine produced no audio" on multi-line text, because its eSpeak driver could return before it finished writing the file.
 - **Fixed:** The speed setting only worked with gTTS. It now applies to every engine.
-- **Changed:** Coqui TTS is optional and documented as such. It now installs on current Python, but pulls in PyTorch (several GB).
+- **Added:** The app can install Coqui TTS for you. Choosing it offers a one-click install into a private environment (CPU-only PyTorch, about 1 GB) with a live log and Cancel. Coqui then runs in a background worker, so it also works in the packaged app. Engines can offer this through new optional `can_install()` and `install()` methods.
+- **Fixed:** After switching to an engine with missing dependencies, the status still said "Stopped" and the buttons came back on, because the startup code kept a separate copy of the "missing dependencies" flag.
 - **Changed:** Drop-down lists grow wider than their box so long voice names aren't cut off.
 
 ### 1.2.0 — 2026-11-12

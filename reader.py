@@ -960,7 +960,7 @@ def themed_toplevel(parent, title):
     return dialog, content
 
 def create_control_window():
-    global control_window, playback_speed, hotkeys
+    global control_window, playback_speed, hotkeys, engine_missing_deps
     window = tk.Tk(className="reader")
     window.title("Clipboard Reader")
     window.resizable(False, False)
@@ -1009,16 +1009,113 @@ def create_control_window():
         load_voices(tts_engine)
         missing_deps = check_engine_dependencies(tts_engine)
         if missing_deps:
-            safe_showwarning(
-                "Missing Dependencies",
-                "The selected TTS engine is missing:\n\n" + "\n".join(missing_deps),
-            )
             window.set_buttons_state(True)
             engine_missing_deps = True
+            handle_missing_engine(tts_engine, missing_deps)
         else:
             window.set_buttons_state(False)
             engine_missing_deps = False
     engine_dropdown.bind("<<ComboboxSelected>>", on_engine_select)
+
+    def handle_missing_engine(engine_name, missing_deps):
+        """Offer to install an engine the app can install; otherwise explain what's missing."""
+        engine = get_engine(engine_name)
+        if engine is not None and engine.can_install():
+            question = (f"{engine_name} isn't installed yet.\n\n{engine.install_note}\n\nInstall it now?")
+            if messagebox.askyesno(f"Install {engine_name}?", question, parent=window):
+                open_install_dialog(engine_name)
+            return
+        safe_showwarning(
+            "Missing Dependencies",
+            f"The TTS engine '{engine_name}' is missing:\n\n" + "\n".join(missing_deps),
+        )
+
+    def open_install_dialog(engine_name):
+        """Run engine.install() in the background with a live log and a Cancel button."""
+        engine = get_engine(engine_name)
+        cancel_event = threading.Event()
+        lines = queue.Queue()
+        result = {}
+        dialog, body = themed_toplevel(window, f"Installing {engine_name}")
+        dialog.transient(window)
+        heading = ttk.Label(body, text=f"Installing {engine_name}…", style="Header.TLabel")
+        heading.pack(anchor="w")
+        progress = ttk.Progressbar(body, orient=tk.HORIZONTAL, length=460, mode="indeterminate")
+        progress.pack(fill=tk.X, pady=(8, 8))
+        progress.start(12)
+        log_frame = ttk.Frame(body)
+        log_frame.pack(fill=tk.BOTH, expand=True)
+        log_view = tk.Text(log_frame, height=12, width=72, wrap=tk.NONE, font=_theme_fonts["small"],
+                           background=PALETTE["field"], foreground=PALETTE["muted"], relief=tk.FLAT,
+                           highlightthickness=1, highlightbackground=PALETTE["border"],
+                           highlightcolor=PALETTE["border"], padx=8, pady=6)
+        log_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=log_view.yview)
+        log_view.configure(yscrollcommand=log_scroll.set, state=tk.DISABLED)
+        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        log_view.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        button = ttk.Button(body, text="Cancel")
+        button.pack(anchor="e", pady=(10, 0))
+
+        def on_button():
+            if "done" in result:
+                dialog.destroy()
+            elif not cancel_event.is_set():
+                cancel_event.set()
+                heading.config(text="Cancelling…")
+                button.state(["disabled"])
+        button.config(command=on_button)
+        dialog.protocol("WM_DELETE_WINDOW", on_button)
+
+        def worker():
+            try:
+                engine.install(lines.put, cancel_event)
+                result["done"] = "ok"
+            except SynthesisCancelled:
+                result["done"] = "cancelled"
+            except Exception as e:
+                result["done"] = "error"
+                result["error"] = str(e)
+
+        def poll():
+            global engine_missing_deps
+            added = False
+            while True:
+                try:
+                    line = lines.get_nowait()
+                except queue.Empty:
+                    break
+                log_view.configure(state=tk.NORMAL)
+                log_view.insert(tk.END, line + "\n")
+                if int(log_view.index("end-1c").split(".")[0]) > 2000:
+                    log_view.delete("1.0", "500.0")  # keep the log from growing forever
+                log_view.configure(state=tk.DISABLED)
+                added = True
+            if added:
+                log_view.see(tk.END)
+            if "done" not in result:
+                dialog.after(150, poll)
+                return
+            progress.stop()
+            button.state(["!disabled"])
+            button.config(text="Close")
+            status = result["done"]
+            if status == "ok":
+                heading.config(text=f"{engine_name} is installed and ready.")
+                progress.configure(mode="determinate", value=100)
+                if tts_engine == engine_name:
+                    engine_missing_deps = False
+                    window.set_buttons_state(False)
+                    load_voices(engine_name)
+            elif status == "cancelled":
+                dialog.destroy()
+                print(f"Install of {engine_name} cancelled")
+            else:
+                heading.config(text=f"Install failed: {result.get('error', '')}", style="Error.TLabel",
+                               wraplength=460)
+                print(f"Install of {engine_name} failed: {result.get('error')}")
+
+        threading.Thread(target=worker, daemon=True).start()
+        poll()
 
     ttk.Label(form, text="Voice").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=3)
     voice_var = tk.StringVar(value="Loading voices…")
@@ -1384,10 +1481,7 @@ def create_control_window():
         else:
             print(f"🐛 [DEBUG] Selected engine {tts_engine} dependencies satisfied")
     if current_missing:
-        safe_showwarning(
-            "Missing TTS Dependencies",
-            f"The selected TTS engine '{tts_engine}' is missing:\n\n" + "\n".join(current_missing),
-        )
+        window.after(400, lambda: handle_missing_engine(tts_engine, current_missing))
     if current_missing:
         engine_missing_deps = True
         window.set_buttons_state(True)
