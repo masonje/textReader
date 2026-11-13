@@ -1,5 +1,5 @@
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 # Dependency check
 import sys
@@ -692,6 +692,14 @@ def start_build(text):
             if missing_deps:
                 results.put(("error", f"Missing: {', '.join(missing_deps)}"))
                 return
+            download = engine.voice_download_info(voice)
+            if download and not download["downloaded"]:
+                # Fetch the voice first, reporting progress to the dialog
+                results.put(("progress", (0, download["size_bytes"])))
+                engine.download_voice(voice, lambda done, total: results.put(("progress", (done, total))), cancel_event)
+                results.put(("progress", None))  # download finished; now building
+                if voices_changed_callback is not None:
+                    voices_changed_callback(engine_name)
             ready = engine.voice_ready(voice)  # False: this build includes a download or model load
             started = time.monotonic()
             engine.synthesize(text, temp_path, cancel_event, voice=voice)
@@ -708,6 +716,7 @@ def start_build(text):
             results.put(("error", str(e)))
 
     dialog, content = themed_toplevel(control_window, "Building Audio")
+    dialog.minsize(340, 0)  # wide enough for the "Downloading Voice" title
     dialog.attributes("-topmost", True)
     label = ttk.Label(content, text="Building audio for playback…")
     label.pack(anchor="w")
@@ -738,14 +747,39 @@ def start_build(text):
         if current_build is cancel_event:
             current_build = None
 
+    def show_download(update):
+        """Switch the dialog between 'downloading the voice' and 'building'."""
+        try:
+            if update is None:
+                dialog.title("Building Audio")
+                label.config(text="Building audio for playback…")
+                progress.configure(mode="indeterminate", value=0)
+                progress.start(10)
+                return
+            done, total = update
+            if str(progress.cget("mode")) != "determinate":
+                progress.stop()
+                progress.configure(mode="determinate", maximum=100)
+                dialog.title("Downloading Voice")
+            progress.configure(value=100 * done / total if total else 0)
+            label.config(text=f"Downloading voice: {done / 1e6:.1f} of {total / 1e6:.0f} MB "
+                              f"({100 * done / total if total else 0:.0f}%)")
+        except tk.TclError:
+            pass  # the dialog was closed
+
     def poll():
         if cancel_event.is_set():
             close_dialog()  # e.g. cancelled by the Stop hotkey or a newer read
-        try:
-            status, message = results.get_nowait()
-        except queue.Empty:
-            control_window.after(100, poll)
-            return
+        while True:
+            try:
+                status, message = results.get_nowait()
+            except queue.Empty:
+                control_window.after(100, poll)
+                return
+            if status != "progress":
+                break
+            if not cancel_event.is_set():
+                show_download(message)
         finish()
         if status == "done" and not cancel_event.is_set():
             close_dialog()
@@ -1416,6 +1450,18 @@ def create_control_window():
         else:
             load_voices(tts_engine, show_loading=False)
 
+    # Voice downloads started from the manager ("engine|voice" -> progress); they keep
+    # going if the dialog is closed. manager_hooks["refresh"] reloads an engine's
+    # voices in the open dialog, if there is one.
+    active_downloads = {}
+    manager_hooks = {"refresh": None}
+
+    def after_voice_files_changed(engine_name):
+        if voices_changed_callback is not None:
+            voices_changed_callback(engine_name)   # main Voice drop-down labels
+        if manager_hooks["refresh"] is not None:
+            manager_hooks["refresh"](engine_name)  # the manager's list and details
+
     def open_engine_manager():
         """Turn engines and voices on or off, and see details, speed and ratings for each."""
         dialog, body = themed_toplevel(window, "Engines & Voices")
@@ -1515,16 +1561,36 @@ def create_control_window():
             redraw(name)
 
         def fill_voices(name, voices):
+            previous = rows.get(selected["row"]) if selected["row"] else None
             voice_lists[name] = voices
             item = engine_items[name]
             for child in tree.get_children(item):
                 tree.delete(child)
+                rows.pop(child, None)
+            reselect = None
             for voice_id, _ in voices:
                 child = tree.insert(item, tk.END, text="")
                 rows[child] = ("voice", name, voice_id)
+                if previous and previous[0] == "voice" and previous[1] == name and previous[2] == voice_id:
+                    reselect = child
             redraw(name)
-            if selected["row"] and rows.get(selected["row"], (None, None))[1] == name:
+            if reselect is not None:
+                tree.selection_set(reselect)
+                show_details(reselect)
+            elif previous and previous[1] == name:
                 show_details(selected["row"])
+
+        def refresh_engine(name):
+            def work():
+                engine = get_engine(name)
+                try:
+                    voices = engine.list_voices() if not engine.check_dependencies() else []
+                except Exception:
+                    voices = []
+                main_thread_calls.put(lambda: dialog.winfo_exists() and fill_voices(name, voices))
+            threading.Thread(target=work, daemon=True).start()
+        manager_hooks["refresh"] = refresh_engine
+        dialog.bind("<Destroy>", lambda e: e.widget is dialog and manager_hooks.update(refresh=None))
 
         def load_all():
             for name in all_names:
@@ -1565,6 +1631,14 @@ def create_control_window():
             ttk.Label(details, text=label, style="Header.TLabel", wraplength=290).pack(anchor="w")
             subtitle = f"{name} voice" if voice_id else engine.about
             ttk.Label(details, text=subtitle, style="Muted.TLabel", wraplength=290, justify="left").pack(anchor="w", pady=(2, 8))
+            # Actions and rating go first so they're always visible; the detail rows follow
+            actions = ttk.Frame(details)
+            actions.pack(anchor="w", fill=tk.X)
+            download_holder = ttk.Frame(details)
+            download_holder.pack(anchor="w", fill=tk.X)
+            rating_holder = ttk.Frame(details)
+            rating_holder.pack(anchor="w", fill=tk.X)
+            ttk.Separator(details).pack(fill=tk.X, pady=(10, 8))
             grid = ttk.Frame(details)
             grid.pack(anchor="w", fill=tk.X)
             row = 0
@@ -1576,6 +1650,18 @@ def create_control_window():
                 field(grid, row, "Generated", generated_where(engine, long=True)); row += 1
                 field(grid, row, "Internet", "Needed" if engine.needs_internet else "Not needed (works offline)"); row += 1
                 field(grid, row, "Format", engine.output_ext.upper()); row += 1
+                infos = []
+                for v, _ in voices or []:
+                    try:
+                        info = engine.voice_download_info(v)
+                    except Exception:
+                        info = None
+                    if info is not None:
+                        infos.append(info)
+                if infos:
+                    got = [i for i in infos if i["downloaded"]]
+                    total = sum(i["size_bytes"] for i in got)
+                    field(grid, row, "On disk", f"{len(got)} of {len(infos)} voices downloaded · {total / 1e6:.0f} MB"); row += 1
                 rtf, runs = speed_of(name)
                 field(grid, row, "Speed", speed_sentence(rtf, runs)); row += 1
                 field(grid, row, "Quality", f"{stars(engine.quality)}  (typical for this engine)"); row += 1
@@ -1592,8 +1678,8 @@ def create_control_window():
                 rtf, runs = speed_of(name, voice_id)
                 field(grid, row, "Speed", speed_sentence(rtf, runs)); row += 1
 
-                rating_row = ttk.Frame(details)
-                rating_row.pack(anchor="w", pady=(10, 0))
+                rating_row = ttk.Frame(rating_holder)
+                rating_row.pack(anchor="w", pady=(8, 0))
                 ttk.Label(rating_row, text="Your rating", style="Muted.TLabel").pack(side=tk.LEFT, padx=(0, 8))
                 current = rating_of(name, voice_id)
                 key = voice_key(name, voice_id)
@@ -1609,14 +1695,92 @@ def create_control_window():
                 else:
                     ttk.Label(rating_row, text="(default)", style="Muted.TLabel").pack(side=tk.LEFT, padx=(8, 0))
 
-            preview_row = ttk.Frame(details)
-            preview_row.pack(anchor="w", fill=tk.X, pady=(14, 0))
+            if voice_id is not None:
+                try:
+                    download = engine.voice_download_info(voice_id)
+                except Exception:
+                    download = None
+                if download is not None:
+                    download_controls(name, voice_id, download, download_holder)
+
+            preview_row = ttk.Frame(actions)
+            preview_row.pack(anchor="w", fill=tk.X)
             preview_btn = ttk.Button(preview_row, text="▶  Preview", command=lambda: preview(name, voice_id, preview_status, preview_btn))
             preview_btn.pack(side=tk.LEFT)
             preview_status = ttk.Label(preview_row, text="", style="Muted.TLabel", wraplength=180)
             preview_status.pack(side=tk.LEFT, padx=(8, 0))
             if engine.check_dependencies():
                 preview_btn.state(["disabled"])
+
+        def download_controls(name, voice_id, info, parent):
+            """Download button with progress, or Delete for a downloaded voice."""
+            key = voice_key(name, voice_id)
+            area = ttk.Frame(parent)
+            area.pack(anchor="w", fill=tk.X, pady=(8, 0))
+            job = active_downloads.get(key)
+            if job and not job["finished"]:
+                bar = ttk.Progressbar(area, orient=tk.HORIZONTAL, mode="determinate", maximum=100, length=290)
+                bar.pack(anchor="w", fill=tk.X)
+                status = ttk.Label(area, text="Starting download…", style="Muted.TLabel")
+                status.pack(anchor="w", pady=(4, 0))
+                ttk.Button(area, text="Cancel download", command=job["cancel"].set).pack(anchor="w", pady=(6, 0))
+
+                def tick():
+                    if not bar.winfo_exists():
+                        return
+                    if job["finished"]:
+                        return  # the reload after the download redraws this panel
+                    done, total = job["done"], job["total"] or 1
+                    bar.configure(value=100 * done / total)
+                    status.config(text=f"Downloading: {done / 1e6:.1f} of {total / 1e6:.0f} MB ({100 * done / total:.0f}%)")
+                    bar.after(200, tick)
+                tick()
+                return
+            if info["downloaded"]:
+                ttk.Button(area, text="Delete download", command=lambda: delete_download(name, voice_id, info)).pack(side=tk.LEFT)
+                ttk.Label(area, text=f"frees {info['size_bytes'] / 1e6:.0f} MB", style="Muted.TLabel").pack(side=tk.LEFT, padx=(8, 0))
+            else:
+                ttk.Button(area, text=f"Download ({info['size_bytes'] / 1e6:.0f} MB)",
+                           command=lambda: start_download(name, voice_id, info)).pack(side=tk.LEFT)
+            if job and job.get("error"):
+                ttk.Label(parent, text=job["error"], style="Error.TLabel", wraplength=290).pack(anchor="w", pady=(4, 0))
+
+        def start_download(name, voice_id, info):
+            key = voice_key(name, voice_id)
+            job = {"done": 0, "total": info["size_bytes"], "cancel": threading.Event(), "finished": False, "error": None}
+            active_downloads[key] = job
+
+            def progress(done, total):
+                job["done"], job["total"] = done, total
+
+            def work():
+                try:
+                    get_engine(name).download_voice(voice_id, progress, job["cancel"])
+                except SynthesisCancelled:
+                    job["error"] = "Download cancelled."
+                except Exception as e:
+                    job["error"] = f"Download failed: {e}"
+                finally:
+                    job["finished"] = True
+                    main_thread_calls.put(lambda: after_voice_files_changed(name))
+            threading.Thread(target=work, daemon=True).start()
+            show_details(selected["row"])
+
+        def delete_download(name, voice_id, info):
+            label = dict(voice_lists.get(name, [])).get(voice_id, voice_id).split(" · ")[0]
+            if not messagebox.askyesno(
+                "Delete voice",
+                f"Delete the downloaded {name} voice {label}?\n\nThis frees {info['size_bytes'] / 1e6:.0f} MB. "
+                "It will download again the next time you use it.",
+                parent=dialog,
+            ):
+                return
+            try:
+                get_engine(name).delete_voice(voice_id)
+                active_downloads.pop(voice_key(name, voice_id), None)
+            except Exception as e:
+                note.config(text=f"Could not delete: {e}")
+            after_voice_files_changed(name)
 
         def set_rating(key, value):
             if value is None:
@@ -1637,13 +1801,46 @@ def create_control_window():
             if voice_id is None:
                 choices = [v for v, _ in enabled_voices(name, voice_lists.get(name, []))]
                 voice_id = engine_voices.get(name) if engine_voices.get(name) in choices else (choices[0] if choices else None)
-            button.state(["disabled"])
-            status_label.config(text="Building sample…")
-            speaker = (dict(voice_lists.get(name, [])).get(voice_id, name) or name).split(" (")[0]
+            speaker = (dict(voice_lists.get(name, [])).get(voice_id, name) or name).split(" (")[0].split(" · ")[0]
             sample = f"Hello, this is {speaker}. Here is how I sound reading a sentence aloud."
+
+            # A voice that isn't downloaded yet is fetched first, with a progress dialog
+            try:
+                download = engine.voice_download_info(voice_id)
+            except Exception:
+                download = None
+            key = voice_key(name, voice_id)
+            job = None
+            if download and not download["downloaded"]:
+                running = active_downloads.get(key)
+                if running and not running["finished"]:
+                    status_label.config(text="This voice is already downloading.")
+                    return
+                job = {"done": 0, "total": download["size_bytes"], "cancel": threading.Event(),
+                       "finished": False, "error": None, "phase": "download"}
+                active_downloads[key] = job
+                preview_progress_dialog(job, speaker)
+                show_details(selected["row"])  # the panel shows the download too
+            else:
+                button.state(["disabled"])
+                status_label.config(text="Building sample…")
 
             def work():
                 import tempfile
+                if job is not None:
+                    try:
+                        engine.download_voice(voice_id, lambda d, t: job.update(done=d, total=t), job["cancel"])
+                    except SynthesisCancelled:
+                        job["error"] = "Download cancelled."
+                    except Exception as e:
+                        job["error"] = f"Download failed: {e}"
+                    finally:
+                        job["finished"] = True
+                        main_thread_calls.put(lambda: after_voice_files_changed(name))
+                    if job["error"]:
+                        job["phase"] = "closed"
+                        return
+                    job["phase"] = "building"
                 try:
                     ready = engine.voice_ready(voice_id)
                     tmp = tempfile.mkdtemp(prefix="textreader-preview-")
@@ -1657,6 +1854,8 @@ def create_control_window():
                         wav = os.path.join(tmp, "sample.wav")
                         run_cancellable(["ffmpeg", "-y", "-loglevel", "error", "-i", path, wav], timeout=30)
                     sound = pygame.mixer.Sound(wav)
+                    if job is not None:
+                        job["phase"] = "closed"
                     sound.play()
                     def done():
                         if ready:
@@ -1669,9 +1868,45 @@ def create_control_window():
                     time.sleep(sound.get_length() + 0.5)
                     shutil.rmtree(tmp, ignore_errors=True)
                 except Exception as e:
+                    if job is not None:
+                        job["phase"] = "closed"
                     main_thread_calls.put(lambda: status_label.winfo_exists() and (
                         status_label.config(text=f"Preview failed: {e}"), button.state(["!disabled"])))
             threading.Thread(target=work, daemon=True).start()
+
+        def preview_progress_dialog(job, speaker):
+            """'Downloading Voice' window for a preview: download progress, then building, then it closes."""
+            win, box = themed_toplevel(dialog, "Downloading Voice")
+            win.transient(dialog)
+            win.minsize(340, 0)
+            text = ttk.Label(box, text=f"Downloading {speaker}…")
+            text.pack(anchor="w")
+            bar = ttk.Progressbar(box, orient=tk.HORIZONTAL, length=300, mode="determinate", maximum=100)
+            bar.pack(fill=tk.X, pady=(10, 12))
+            cancel = ttk.Button(box, text="Cancel", command=job["cancel"].set)
+            cancel.pack(anchor="e")
+            win.protocol("WM_DELETE_WINDOW", job["cancel"].set)
+
+            def tick():
+                if not win.winfo_exists():
+                    return
+                phase = job.get("phase")
+                if phase == "closed":
+                    win.destroy()
+                    return
+                if phase == "building":
+                    if str(bar.cget("mode")) != "indeterminate":
+                        win.title("Building Preview")
+                        text.config(text=f"Downloaded. Building the {speaker} sample…")
+                        bar.configure(mode="indeterminate")
+                        bar.start(10)
+                        cancel.state(["disabled"])
+                else:
+                    done, total = job["done"], job["total"] or 1
+                    bar.configure(value=100 * done / total)
+                    text.config(text=f"Downloading {speaker}: {done / 1e6:.1f} of {total / 1e6:.0f} MB ({100 * done / total:.0f}%)")
+                win.after(150, tick)
+            tick()
 
         def changed():
             save_settings()

@@ -10,7 +10,7 @@ import os
 import threading
 import urllib.request
 import wave
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from .base import DATA_DIR, SynthesisCancelled, TTSEngine, Voice
 
@@ -41,12 +41,23 @@ _loaded: Dict[str, object] = {}
 _lock = threading.Lock()
 
 
+EXPECTED_SIZE = 63_200_000  # typical medium-quality model, used until the real size is known
+
+
 def _model_path(name: str) -> str:
     return str(VOICE_DIR / f"{name}.onnx")
 
 
-def _download(name: str, cancel_event: Optional[threading.Event]) -> None:
-    """Fetch a voice model and its config, checking for cancel between chunks."""
+def _voice_files(name: str):
+    return [VOICE_DIR / f"{name}.onnx.json", VOICE_DIR / f"{name}.onnx"]
+
+
+def _download(
+    name: str,
+    cancel_event: Optional[threading.Event],
+    progress: Optional[Callable[[int, int], None]] = None,
+) -> None:
+    """Fetch a voice model and its config, reporting progress and checking for cancel between chunks."""
     locale, speaker, quality = name.split("-", 2)
     VOICE_DIR.mkdir(parents=True, exist_ok=True)
     for ext in (".onnx.json", ".onnx"):
@@ -57,15 +68,23 @@ def _download(name: str, cancel_event: Optional[threading.Event]) -> None:
         part = dest.with_name(dest.name + ".part")
         request = urllib.request.Request(url, headers={"User-Agent": "textReader"})
         with urllib.request.urlopen(request, timeout=30) as response, open(part, "wb") as out:
+            total = int(response.headers.get("Content-Length") or 0) or EXPECTED_SIZE
+            done = 0
             while True:
                 if cancel_event is not None and cancel_event.is_set():
                     out.close()
                     part.unlink(missing_ok=True)
+                    # Don't leave a config file behind without its model
+                    if not os.path.exists(_model_path(name)):
+                        (VOICE_DIR / f"{name}.onnx.json").unlink(missing_ok=True)
                     raise SynthesisCancelled()
                 block = response.read(256 * 1024)
                 if not block:
                     break
                 out.write(block)
+                done += len(block)
+                if progress is not None and ext == ".onnx":  # the config file is tiny; report the model
+                    progress(done, max(total, done))
         os.replace(part, dest)
 
 
@@ -101,7 +120,8 @@ class PiperEngine(TTSEngine):
                    "Runs": "Offline, on this computer", "Model": name, "Model quality": quality}
         model = _model_path(name)
         if os.path.exists(model):
-            details["Download"] = f"Downloaded ({os.path.getsize(model) / 1e6:.0f} MB)"
+            on_disk = sum(p.stat().st_size for p in _voice_files(name) if p.exists())
+            details["Download"] = f"Downloaded · {on_disk / 1e6:.1f} MB on disk"
             try:
                 config = json.loads(open(model + ".json").read())
                 rate = config.get("audio", {}).get("sample_rate")
@@ -112,9 +132,30 @@ class PiperEngine(TTSEngine):
             except Exception:
                 pass
         else:
-            details["Download"] = "Not downloaded yet (about 63 MB, on first use)"
+            details["Download"] = f"Not downloaded yet (about {EXPECTED_SIZE / 1e6:.0f} MB)"
             details["Audio"] = "WAV, 22.05 kHz mono"
         return details
+
+    def voice_download_info(self, voice_id: Optional[str]) -> Optional[Dict[str, object]]:
+        name = voice_id if voice_id in _VOICE_IDS else VOICES[0][0]
+        if os.path.exists(_model_path(name)):
+            return {"downloaded": True, "size_bytes": sum(p.stat().st_size for p in _voice_files(name) if p.exists())}
+        return {"downloaded": False, "size_bytes": EXPECTED_SIZE}
+
+    def download_voice(
+        self,
+        voice_id: Optional[str],
+        progress: Optional[Callable[[int, int], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> None:
+        _download(voice_id if voice_id in _VOICE_IDS else VOICES[0][0], cancel_event, progress)
+
+    def delete_voice(self, voice_id: Optional[str]) -> None:
+        name = voice_id if voice_id in _VOICE_IDS else VOICES[0][0]
+        with _lock:
+            _loaded.pop(name, None)
+            for path in _voice_files(name):
+                path.unlink(missing_ok=True)
 
     def voice_ready(self, voice_id: Optional[str]) -> bool:
         name = voice_id if voice_id in _VOICE_IDS else VOICES[0][0]
