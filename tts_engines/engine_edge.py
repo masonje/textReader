@@ -9,11 +9,11 @@ import asyncio
 import json
 import threading
 import time
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from .base import DATA_DIR, SynthesisCancelled, TTSEngine, Voice
 
-CACHE_FILE = DATA_DIR / "edge_voices.json"
+CACHE_FILE = DATA_DIR / "edge_voices_v2.json"  # v2 keeps full voice details
 CACHE_MAX_AGE = 7 * 24 * 3600
 
 # Used until the online list has been fetched (or if it can't be)
@@ -36,6 +36,9 @@ REGIONS = {
     "NZ": "New Zealand", "ZA": "South Africa", "SG": "Singapore", "PH": "Philippines",
     "NG": "Nigeria", "KE": "Kenya", "TZ": "Tanzania", "HK": "Hong Kong",
 }
+
+
+_details: Dict[str, dict] = {}  # ShortName -> Microsoft's voice metadata
 
 
 def _label(short_name: str, gender: str) -> str:
@@ -61,6 +64,10 @@ def _sort_key(voice: Voice):
 class EdgeEngine(TTSEngine):
     def __init__(self) -> None:
         super().__init__(name="Edge TTS", output_ext="mp3")
+        self.about = ("Microsoft's neural voices, the ones behind Edge's Read Aloud. The most natural-sounding "
+                      "option here, with many accents.")
+        self.quality = 5
+        self.needs_internet = True
 
     def check_dependencies(self) -> List[str]:
         try:
@@ -70,29 +77,48 @@ class EdgeEngine(TTSEngine):
         return []
 
     def list_voices(self) -> List[Voice]:
+        listed = None
         try:
             if time.time() - CACHE_FILE.stat().st_mtime < CACHE_MAX_AGE:
-                cached = json.loads(CACHE_FILE.read_text())
-                if cached:
-                    return sorted((tuple(v) for v in cached), key=_sort_key)
+                listed = json.loads(CACHE_FILE.read_text()) or None
         except Exception:
             pass
-        try:
-            import edge_tts
+        if listed is None:
+            try:
+                import edge_tts
 
-            listed = asyncio.run(asyncio.wait_for(edge_tts.list_voices(), timeout=8))
-            voices = sorted(
-                ((v["ShortName"], _label(v["ShortName"], v.get("Gender", ""))) for v in listed
-                 if v.get("Locale", "").startswith("en-")),
-                key=_sort_key,
-            )
-            if voices:
-                CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-                CACHE_FILE.write_text(json.dumps(voices))
-                return voices
-        except Exception:
-            pass
-        return list(FALLBACK)
+                listed = [v for v in asyncio.run(asyncio.wait_for(edge_tts.list_voices(), timeout=8))
+                          if v.get("Locale", "").startswith("en-")]
+                if listed:
+                    CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    CACHE_FILE.write_text(json.dumps(listed))
+            except Exception:
+                listed = None
+        if not listed:
+            return list(FALLBACK)
+        _details.update({v["ShortName"]: v for v in listed})
+        return sorted(((v["ShortName"], _label(v["ShortName"], v.get("Gender", ""))) for v in listed), key=_sort_key)
+
+    def describe_voice(self, voice_id: Optional[str]) -> Dict[str, str]:
+        voice_id = voice_id or FALLBACK[0][0]
+        if not _details:
+            self.list_voices()
+        info = _details.get(voice_id, {})
+        label = _label(voice_id, info.get("Gender", "")) if info else dict(FALLBACK).get(voice_id, voice_id)
+        details = {"Speaker": label.split(" (")[0], "Gender": info.get("Gender", "—")}
+        friendly = info.get("FriendlyName", "")
+        details["Accent"] = friendly.split(" - ", 1)[1] if " - " in friendly else info.get("Locale", "—")
+        tags = info.get("VoiceTag", {}) or {}
+        if tags.get("VoicePersonalities"):
+            details["Personality"] = ", ".join(tags["VoicePersonalities"])
+        if tags.get("ContentCategories"):
+            details["Good for"] = ", ".join(tags["ContentCategories"])
+        if "Multilingual" in voice_id:
+            details["Note"] = "Multilingual: can also read other languages"
+        details["Runs"] = "Online (Microsoft servers)"
+        details["Audio"] = "MP3, 24 kHz mono"
+        details["Voice id"] = voice_id
+        return details
 
     def synthesize(
         self,

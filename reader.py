@@ -192,6 +192,8 @@ def default_settings():
         "voices": {},
         "disabled_engines": [],
         "disabled_voices": {},
+        "voice_stats": {},
+        "voice_ratings": {},
     }
 
 def normalize_loaded_hotkeys(raw_hotkeys):
@@ -220,7 +222,8 @@ def save_settings():
         with open(SETTINGS_FILE, "w") as f:
             json.dump({"debug_mode": debug_mode, "playback_speed": playback_speed, "tts_engine": tts_engine, "hotkeys": hotkeys, "theme": ui_theme, "view_mode": view_mode, "full_window_size": full_window_size, "voices": engine_voices,
                        "disabled_engines": sorted(disabled_engines),
-                       "disabled_voices": {k: sorted(v) for k, v in disabled_voices.items() if v}}, f, indent=2)
+                       "disabled_voices": {k: sorted(v) for k, v in disabled_voices.items() if v},
+                       "voice_stats": voice_stats, "voice_ratings": voice_ratings}, f, indent=2)
     except Exception:
         pass
 
@@ -246,6 +249,39 @@ engine_voices = settings.get("voices", {})  # engine name -> chosen voice id
 # Engines and voices hidden from the drop-downs (managed in the full view)
 disabled_engines = set(settings.get("disabled_engines", []) or [])
 disabled_voices = {k: set(v) for k, v in (settings.get("disabled_voices", {}) or {}).items()}
+# Measured build speed per voice ("engine|voice" -> {"runs": n, "rtf": seconds of work per second of audio})
+voice_stats = settings.get("voice_stats", {}) or {}
+# The user's own star ratings ("engine|voice" -> 1-5); engines provide defaults
+voice_ratings = settings.get("voice_ratings", {}) or {}
+
+def voice_key(engine_name, voice_id):
+    return f"{engine_name}|{voice_id or ''}"
+
+def record_speed(engine_name, voice_id, build_seconds, audio_seconds):
+    """Fold one build into the running average (recent reads count most)."""
+    if audio_seconds < 0.5 or build_seconds <= 0:
+        return
+    key = voice_key(engine_name, voice_id)
+    stat = voice_stats.get(key, {"runs": 0, "rtf": 0.0})
+    weight = min(stat["runs"], 9)
+    stat["rtf"] = (stat["rtf"] * weight + build_seconds / audio_seconds) / (weight + 1)
+    stat["runs"] += 1
+    voice_stats[key] = stat
+
+def speed_word(rtf):
+    if rtf < 0.05:
+        return "Very fast"
+    if rtf < 0.25:
+        return "Fast"
+    if rtf < 0.6:
+        return "Moderate"
+    if rtf < 1.0:
+        return "Slow"
+    return "Very slow"
+
+def stars(rating):
+    rating = max(0, min(5, int(round(rating))))
+    return "★" * rating + "☆" * (5 - rating)
 
 def enabled_engines():
     """Engine names to offer, in display order (all of them if everything was disabled)."""
@@ -645,13 +681,16 @@ def start_build(text):
             if missing_deps:
                 results.put(("error", f"Missing: {', '.join(missing_deps)}"))
                 return
+            ready = engine.voice_ready(voice)  # False: this build includes a download or model load
+            started = time.monotonic()
             engine.synthesize(text, temp_path, cancel_event, voice=voice)
+            build_seconds = time.monotonic() - started
             if cancel_event.is_set():
                 raise SynthesisCancelled()
             if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
                 results.put(("error", "Engine produced no audio"))
                 return
-            results.put(("done", None))
+            results.put(("done", (ready, build_seconds, get_audio_duration(temp_path))))
         except SynthesisCancelled:
             results.put(("cancelled", None))
         except Exception as e:
@@ -707,6 +746,9 @@ def start_build(text):
                 remove_temp()
                 return
             threading.Thread(target=play_audio, daemon=True).start()
+            if message and message[0]:
+                record_speed(engine_name, voice, message[1], message[2])
+                save_settings()
             if voices_changed_callback is not None:
                 voices_changed_callback(engine_name)  # e.g. a Piper voice just finished downloading
             return
@@ -1364,22 +1406,38 @@ def create_control_window():
             load_voices(tts_engine, show_loading=False)
 
     def open_engine_manager():
-        """Turn engines and individual voices on or off (what the drop-downs offer)."""
+        """Turn engines and voices on or off, and see details, speed and ratings for each."""
         dialog, body = themed_toplevel(window, "Engines & Voices")
         dialog.transient(window)
         dialog.resizable(True, True)
-        ttk.Label(body, text="Choose which engines and voices appear in the drop-downs. "
-                             "Click a row to turn it on or off.", wraplength=440).pack(anchor="w")
-        tree_frame = ttk.Frame(body)
-        tree_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 8))
-        tree = ttk.Treeview(tree_frame, show="tree", selectmode="browse", height=16)
-        tree.column("#0", width=420)
+        dialog.minsize(820, 520)
+        ttk.Label(body, text="Click a row's box to turn it on or off; turned-off engines and voices are hidden "
+                             "from the drop-downs. Select a row to see its details.", wraplength=780).pack(anchor="w")
+
+        panes = ttk.Frame(body)
+        panes.pack(fill=tk.BOTH, expand=True, pady=(10, 8))
+        tree_frame = ttk.Frame(panes)
+        tree_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree = ttk.Treeview(tree_frame, columns=("speed", "quality"), show="tree headings",
+                            selectmode="browse", height=16)
+        tree.heading("#0", text="Engine / voice", anchor="w")
+        tree.heading("speed", text="Speed", anchor="w")
+        tree.heading("quality", text="Quality", anchor="w")
+        tree.column("#0", width=300, stretch=True)
+        tree.column("speed", width=90, stretch=False)
+        tree.column("quality", width=96, stretch=False)
         scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
         tree.configure(yscrollcommand=scroll.set)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         tree.tag_configure("off", foreground=PALETTE["disabled"])
         tree.tag_configure("engine", font=_theme_fonts["bold"])
+
+        ttk.Separator(panes, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=12)
+        details = ttk.Frame(panes, width=300)
+        details.pack(side=tk.LEFT, fill=tk.Y)
+        details.pack_propagate(False)
+
         note = ttk.Label(body, text="", style="Muted.TLabel")
         note.pack(anchor="w")
         buttons = ttk.Frame(body)
@@ -1388,35 +1446,53 @@ def create_control_window():
         all_names = sorted(list_engines(), key=str.lower)
         voice_lists = {}   # engine -> [(voice_id, label)]
         rows = {}          # tree item -> ("engine", name) or ("voice", name, voice_id)
+        engine_items = {}
+        selected = {"row": None}
 
         def box(on):
             return "☑" if on else "☐"
+
+        def rating_of(name, voice_id):
+            return voice_ratings.get(voice_key(name, voice_id), get_engine(name).quality)
+
+        def speed_of(name, voice_id=None):
+            """(rtf, runs) for a voice, or the average over an engine's measured voices."""
+            if voice_id is not None:
+                stat = voice_stats.get(voice_key(name, voice_id))
+                return (stat["rtf"], stat["runs"]) if stat else (None, 0)
+            measured = [v for k, v in voice_stats.items() if k.split("|", 1)[0] == name]
+            if not measured:
+                return None, 0
+            return sum(v["rtf"] for v in measured) / len(measured), sum(v["runs"] for v in measured)
 
         def engine_text(name):
             text = f"{box(name not in disabled_engines)}  {name}"
             voices = voice_lists.get(name)
             if voices:
                 on = sum(1 for v, _ in voices if v not in disabled_voices.get(name, set()))
-                text += f"   ({on} of {len(voices)} voices on)"
+                text += f"   ({on} of {len(voices)} on)"
             elif voices is None:
-                text += "   (loading voices…)"
-            missing = get_engine(name).check_dependencies()
-            if missing:
+                text += "   (loading…)"
+            if get_engine(name).check_dependencies():
                 text += "   – not installed"
             return text
 
         def redraw(name):
             item = engine_items[name]
-            tree.item(item, text=engine_text(name), tags=("engine",) + (("off",) if name in disabled_engines else ()))
+            rtf, _ = speed_of(name)
+            tree.item(item, text=engine_text(name),
+                      values=(speed_word(rtf) if rtf is not None else "—", stars(get_engine(name).quality)),
+                      tags=("engine",) + (("off",) if name in disabled_engines else ()))
+            labels = dict(voice_lists.get(name, []))
             for child in tree.get_children(item):
                 kind = rows.get(child)
                 if kind and kind[0] == "voice":
                     on = kind[2] not in disabled_voices.get(name, set())
-                    label = dict(voice_lists.get(name, [])).get(kind[2], kind[2])
-                    tree.item(child, text=f"{box(on)}  {label}",
+                    rtf, _ = speed_of(name, kind[2])
+                    tree.item(child, text=f"{box(on)}  {labels.get(kind[2], kind[2])}",
+                              values=(speed_word(rtf) if rtf is not None else "—", stars(rating_of(name, kind[2]))),
                               tags=() if on and name not in disabled_engines else ("off",))
 
-        engine_items = {}
         for name in all_names:
             item = tree.insert("", tk.END, text="", open=False)
             engine_items[name] = item
@@ -1432,6 +1508,8 @@ def create_control_window():
                 child = tree.insert(item, tk.END, text="")
                 rows[child] = ("voice", name, voice_id)
             redraw(name)
+            if selected["row"] and rows.get(selected["row"], (None, None))[1] == name:
+                show_details(selected["row"])
 
         def load_all():
             for name in all_names:
@@ -1442,6 +1520,139 @@ def create_control_window():
                     voices = []
                 main_thread_calls.put(lambda n=name, v=voices: dialog.winfo_exists() and fill_voices(n, v))
         threading.Thread(target=load_all, daemon=True).start()
+
+        # ---- details panel
+        def clear_details():
+            for child in details.winfo_children():
+                child.destroy()
+
+        def field(grid, row, label, value):
+            ttk.Label(grid, text=label, style="Muted.TLabel").grid(row=row, column=0, sticky="nw", padx=(0, 10), pady=2)
+            ttk.Label(grid, text=value, wraplength=190, justify="left").grid(row=row, column=1, sticky="nw", pady=2)
+
+        def speed_sentence(rtf, runs):
+            if rtf is None:
+                return "Not measured yet. Read something or press Preview."
+            seconds = rtf * 60
+            took = f"{seconds:.0f} s" if seconds >= 1.5 else f"{seconds:.1f} s"
+            return f"{speed_word(rtf)}: about {took} to build 1 minute of speech ({runs} read{'s' if runs != 1 else ''})"
+
+        def show_details(item):
+            selected["row"] = item
+            kind = rows.get(item)
+            clear_details()
+            if not kind:
+                return
+            name = kind[1]
+            engine = get_engine(name)
+            voice_id = kind[2] if kind[0] == "voice" else None
+            label = dict(voice_lists.get(name, [])).get(voice_id, voice_id) if voice_id else name
+            ttk.Label(details, text=label, style="Header.TLabel", wraplength=290).pack(anchor="w")
+            subtitle = f"{name} voice" if voice_id else engine.about
+            ttk.Label(details, text=subtitle, style="Muted.TLabel", wraplength=290, justify="left").pack(anchor="w", pady=(2, 8))
+            grid = ttk.Frame(details)
+            grid.pack(anchor="w", fill=tk.X)
+            row = 0
+            if voice_id is None:
+                missing = engine.check_dependencies()
+                voices = voice_lists.get(name)
+                field(grid, row, "Status", "Not installed" if missing else ("On" if name not in disabled_engines else "Off")); row += 1
+                field(grid, row, "Voices", "loading…" if voices is None else str(len(voices) or 1)); row += 1
+                field(grid, row, "Internet", "Needed" if engine.needs_internet else "Not needed (works offline)"); row += 1
+                field(grid, row, "Format", engine.output_ext.upper()); row += 1
+                rtf, runs = speed_of(name)
+                field(grid, row, "Speed", speed_sentence(rtf, runs)); row += 1
+                field(grid, row, "Quality", f"{stars(engine.quality)}  (typical for this engine)"); row += 1
+            else:
+                try:
+                    info = engine.describe_voice(voice_id)
+                except Exception as e:
+                    info = {"Details": f"unavailable ({e})"}
+                for key, value in info.items():
+                    field(grid, row, key, value); row += 1
+                rtf, runs = speed_of(name, voice_id)
+                field(grid, row, "Speed", speed_sentence(rtf, runs)); row += 1
+
+                rating_row = ttk.Frame(details)
+                rating_row.pack(anchor="w", pady=(10, 0))
+                ttk.Label(rating_row, text="Your rating", style="Muted.TLabel").pack(side=tk.LEFT, padx=(0, 8))
+                current = rating_of(name, voice_id)
+                key = voice_key(name, voice_id)
+                for n in range(1, 6):
+                    star = ttk.Label(rating_row, text="★" if n <= current else "☆", cursor="hand2",
+                                     foreground=PALETTE["accent"], font=_theme_fonts["reading"])
+                    star.pack(side=tk.LEFT)
+                    star.bind("<Button-1>", lambda _e, n=n: set_rating(key, n))
+                if key in voice_ratings:
+                    reset = ttk.Label(rating_row, text="reset", style="Muted.TLabel", cursor="hand2")
+                    reset.pack(side=tk.LEFT, padx=(8, 0))
+                    reset.bind("<Button-1>", lambda _e: set_rating(key, None))
+                else:
+                    ttk.Label(rating_row, text="(default)", style="Muted.TLabel").pack(side=tk.LEFT, padx=(8, 0))
+
+            preview_row = ttk.Frame(details)
+            preview_row.pack(anchor="w", fill=tk.X, pady=(14, 0))
+            preview_btn = ttk.Button(preview_row, text="▶  Preview", command=lambda: preview(name, voice_id, preview_status, preview_btn))
+            preview_btn.pack(side=tk.LEFT)
+            preview_status = ttk.Label(preview_row, text="", style="Muted.TLabel", wraplength=180)
+            preview_status.pack(side=tk.LEFT, padx=(8, 0))
+            if engine.check_dependencies():
+                preview_btn.state(["disabled"])
+
+        def set_rating(key, value):
+            if value is None:
+                voice_ratings.pop(key, None)
+            else:
+                voice_ratings[key] = value
+            save_settings()
+            name = key.split("|", 1)[0]
+            redraw(name)
+            show_details(selected["row"])
+
+        def preview(name, voice_id, status_label, button):
+            """Speak a short sample with this voice (and measure its speed)."""
+            if pygame.mixer.music.get_busy() or current_build is not None or audio_preparing:
+                status_label.config(text="Stop the current reading first.")
+                return
+            engine = get_engine(name)
+            if voice_id is None:
+                choices = [v for v, _ in enabled_voices(name, voice_lists.get(name, []))]
+                voice_id = engine_voices.get(name) if engine_voices.get(name) in choices else (choices[0] if choices else None)
+            button.state(["disabled"])
+            status_label.config(text="Building sample…")
+            speaker = (dict(voice_lists.get(name, [])).get(voice_id, name) or name).split(" (")[0]
+            sample = f"Hello, this is {speaker}. Here is how I sound reading a sentence aloud."
+
+            def work():
+                import tempfile
+                try:
+                    ready = engine.voice_ready(voice_id)
+                    tmp = tempfile.mkdtemp(prefix="textreader-preview-")
+                    path = os.path.join(tmp, "sample." + engine.output_ext)
+                    started = time.monotonic()
+                    engine.synthesize(sample, path, threading.Event(), voice=voice_id)
+                    took = time.monotonic() - started
+                    length = get_audio_duration(path)
+                    wav = path
+                    if not path.endswith(".wav"):
+                        wav = os.path.join(tmp, "sample.wav")
+                        run_cancellable(["ffmpeg", "-y", "-loglevel", "error", "-i", path, wav], timeout=30)
+                    sound = pygame.mixer.Sound(wav)
+                    sound.play()
+                    def done():
+                        if ready:
+                            record_speed(name, voice_id, took, length)
+                            save_settings()
+                        if dialog.winfo_exists():
+                            redraw(name)
+                            show_details(selected["row"])
+                    main_thread_calls.put(done)
+                    time.sleep(sound.get_length() + 0.5)
+                    shutil.rmtree(tmp, ignore_errors=True)
+                except Exception as e:
+                    main_thread_calls.put(lambda: status_label.winfo_exists() and (
+                        status_label.config(text=f"Preview failed: {e}"), button.state(["!disabled"])))
+            threading.Thread(target=work, daemon=True).start()
 
         def changed():
             save_settings()
@@ -1473,13 +1684,23 @@ def create_control_window():
                     off.add(voice_id)
             redraw(kind[1])
             changed()
+            if selected["row"] == item:
+                show_details(item)
 
         def on_click(event):
             item = tree.identify_row(event.y)
-            # Clicking the expand arrow only opens/closes the engine
-            if item and tree.identify_element(event.x, event.y) not in ("Treeitem.indicator", "indicator"):
-                toggle(item)
+            if not item or tree.identify_region(event.x, event.y) not in ("tree", "cell"):
+                return
+            element = tree.identify_element(event.x, event.y)
+            if element in ("Treeitem.indicator", "indicator"):
+                return  # the expand arrow only opens/closes the engine
+            # Only clicks on the box (left part of the name column) toggle; elsewhere just selects
+            if tree.identify_column(event.x) == "#0":
+                bbox = tree.bbox(item, "#0")
+                if bbox and event.x - bbox[0] < 60 + (20 if rows[item][0] == "voice" else 0):
+                    toggle(item)
         tree.bind("<ButtonRelease-1>", on_click)
+        tree.bind("<<TreeviewSelect>>", lambda _e: tree.selection() and show_details(tree.selection()[0]))
         tree.bind("<space>", lambda e: toggle(tree.focus()))
 
         def set_all_voices(on):
@@ -1499,6 +1720,9 @@ def create_control_window():
         ttk.Button(buttons, text="All voices off", command=lambda: set_all_voices(False)).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(buttons, text="Close", style="Accent.TButton", command=dialog.destroy, width=8).pack(side=tk.RIGHT)
         dialog.bind("<Escape>", lambda _e: dialog.destroy())
+
+        # Start with the current engine selected
+        tree.selection_set(engine_items.get(tts_engine, engine_items[all_names[0]]))
 
     version_label = ttk.Label(content, text=f"Version {__version__}", style="Muted.TLabel")
     version_label.pack(pady=(12, 0))

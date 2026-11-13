@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from .base import SynthesisCancelled, TTSEngine, Voice
 
@@ -47,6 +47,8 @@ def _is_english(voice) -> bool:
 class Pyttsx3Engine(TTSEngine):
     def __init__(self) -> None:
         super().__init__(name="pyttsx3", output_ext="wav")
+        self.about = "Uses your operating system's built-in voices: eSpeak on Linux, SAPI on Windows, NSSpeechSynthesizer on macOS."
+        self.quality = 2
 
     def check_dependencies(self) -> List[str]:
         missing: List[str] = []
@@ -71,6 +73,12 @@ class Pyttsx3Engine(TTSEngine):
         # American English first when present
         result.sort(key=lambda item: (0 if item[0].endswith("/en-us") else 1, item[1]))
         return result
+
+    def describe_voice(self, voice_id: Optional[str]) -> Dict[str, str]:
+        label = dict(self.list_voices()).get(voice_id or "", voice_id or "system default")
+        gender = "Female" if "female" in label else "Male" if "male" in label else "—"
+        return {"Gender": gender, "Accent": label.split(" (")[0], "Runs": "Offline, on this computer",
+                "Audio": "WAV, 22 kHz mono", "System voice id": voice_id or "default"}
 
     def synthesize(
         self,

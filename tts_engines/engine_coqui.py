@@ -16,7 +16,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from .base import DATA_DIR, SynthesisCancelled, TTSEngine
 
@@ -176,6 +176,8 @@ def _run_logged(cmd: List[str], log: Callable[[str], None], cancel_event: thread
 class CoquiEngine(TTSEngine):
     def __init__(self) -> None:
         super().__init__(name="Coqui TTS", output_ext="wav")
+        self.about = "Neural text-to-speech built on PyTorch (Tacotron2 with a HiFi-GAN vocoder). Natural, but slow on a CPU."
+        self.quality = 4
         self.install_note = (
             "Coqui TTS needs PyTorch, which is too big to ship with the app. Installing it downloads "
             "about 1 GB (CPU-only PyTorch, Coqui, and its voice model) into ~/.textReader/engines/coqui. "
@@ -184,6 +186,17 @@ class CoquiEngine(TTSEngine):
 
     def check_dependencies(self) -> List[str]:
         return [] if _worker_python() else ["coqui-tts"]
+
+    def describe_voice(self, voice_id: Optional[str]) -> Dict[str, str]:
+        installed = "Yes, in ~/.textReader/engines/coqui" if READY_MARKER.exists() else (
+            "Using the app's own Python packages" if _worker_python() else "No (about 1 GB to install)")
+        return {"Gender": "Female", "Accent": "American English", "Trained on": "LJSpeech (one speaker, audiobooks)",
+                "Model": MODEL, "Runs": "Offline, on this computer (CPU)", "Audio": "WAV, 22 kHz mono",
+                "Installed": installed}
+
+    def voice_ready(self, voice_id: Optional[str]) -> bool:
+        # The first read after starting loads PyTorch and the model (several seconds)
+        return _worker is not None and _worker.ready and _worker.alive()
 
     def can_install(self) -> bool:
         return _worker_python() is None and _system_python() is not None

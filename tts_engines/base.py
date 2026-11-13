@@ -4,7 +4,7 @@ import subprocess
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 
 class SynthesisCancelled(Exception):
@@ -33,6 +33,22 @@ class TTSEngine:
         Return an empty list if the engine has no voice choice.
         """
         return []
+
+    # --- Optional: describing the engine and its voices ------------------------
+    about: str = ""             # one or two sentences about the engine
+    quality: int = 3            # default star rating, 1-5 (the user can override it)
+    needs_internet: bool = False
+
+    def describe_voice(self, voice_id: Optional[str]) -> Dict[str, str]:
+        """Details about one voice for the UI, as label -> value (in display order)."""
+        return {}
+
+    def voice_ready(self, voice_id: Optional[str]) -> bool:
+        """False if the next build will include one-time setup (a download, loading a model).
+
+        The app skips speed measurements for those builds so they don't skew the numbers.
+        """
+        return True
 
     # --- Optional: engines the app can install for the user -------------------
     install_note: str = ""  # shown when asking the user whether to install

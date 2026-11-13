@@ -64,7 +64,14 @@ Each TTS engine lives in the tts_engines directory and implements a common inter
 
 Pick the engine and voice in the control window. Each engine remembers its own voice choice.
 
-To shorten the lists, open the Full view and click **Engines & Voices…** at the bottom left. Click any engine or voice to turn it on or off; turned-off ones disappear from the Engine and Voice drop-downs. **All voices on** and **All voices off** act on the selected engine. At least one engine, and one voice per engine, always stays on. The choices are saved as `disabled_engines` and `disabled_voices` in settings.json.
+In the Full view, **Engines & Voices…** (bottom left) opens a list of every engine and voice with its **Speed** and **Quality**:
+- **Details:** select an engine or voice to see its details: gender, accent, whether it needs the internet, download size, audio format, the model or service behind it, and for Edge voices Microsoft's personality and "good for" tags.
+- **Speed** is measured, not guessed. Every read (and every Preview) records how long the voice took to build compared with how long the speech is. "About 8 s to build 1 minute of speech" means fast. Builds that include a one-time download or model load are skipped.
+- **Quality** starts at a typical rating for the engine. Click the stars to rate a voice yourself, or **reset** to go back to the default.
+- **▶ Preview** speaks a short sample with the selected voice.
+- **On/off:** click a row's ☑ box to turn it on or off. Turned-off ones disappear from the Engine and Voice drop-downs. **All voices on** and **All voices off** act on the selected engine. At least one engine, and one voice per engine, always stays on.
+
+These are saved in settings.json as `disabled_engines`, `disabled_voices`, `voice_stats` and `voice_ratings`.
 
 | Engine | Voices | Quality | Needs |
 |---|---|---|---|
@@ -173,6 +180,7 @@ The version number is also stored in `__version__` at the top of `reader.py`.
 - **Added:** Edge TTS engine: Microsoft's online neural voices (about 47 English voices).
 - **Added:** gTTS accents (US, UK, Australia, Canada, India, Ireland, South Africa, Nigeria); female and regional eSpeak voices; the system voices for pyttsx3; and installed Festival voices.
 - **Added:** An Engines & Voices manager (Full view, bottom left) to turn engines and individual voices on or off, so the drop-downs only show the ones you use.
+- **Added:** Voice details in the manager: each engine and voice shows what it is (gender, accent, online/offline, download size, audio format, model or service, and Edge's personality and "good for" tags), its measured speed, and a star quality rating you can change, plus a Preview button. Engines can provide this through new optional `about`, `quality`, `needs_internet`, `describe_voice()` and `voice_ready()`.
 - **Added:** `--check-engines` reports which engines work and tests each one.
 - **Fixed:** pyttsx3 wasn't installed and failed with "Engine produced no audio" on multi-line text, because its eSpeak driver could return before it finished writing the file.
 - **Fixed:** The speed setting only worked with gTTS. It now applies to every engine.

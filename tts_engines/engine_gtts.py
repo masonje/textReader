@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import threading
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from .base import SynthesisCancelled, TTSEngine, Voice
 
@@ -21,6 +21,9 @@ ACCENTS: List[Voice] = [
 class GTTSEngine(TTSEngine):
     def __init__(self) -> None:
         super().__init__(name="gTTS", output_ext="mp3")
+        self.about = "Google Translate's text-to-speech. A clear, natural female voice; the accent changes with the Google domain."
+        self.quality = 3
+        self.needs_internet = True
 
     def check_dependencies(self) -> List[str]:
         missing: List[str] = []
@@ -32,6 +35,16 @@ class GTTSEngine(TTSEngine):
 
     def list_voices(self) -> List[Voice]:
         return list(ACCENTS)
+
+    def describe_voice(self, voice_id: Optional[str]) -> Dict[str, str]:
+        accent = dict(ACCENTS).get(voice_id or "com", voice_id or "")
+        return {
+            "Gender": "Female",
+            "Accent": accent,
+            "Runs": "Online (Google servers)",
+            "Audio": "MP3, 24 kHz mono",
+            "Service": f"translate.google.{voice_id or 'com'}",
+        }
 
     def synthesize(
         self,

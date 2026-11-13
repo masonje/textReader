@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import threading
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from .base import TTSEngine, Voice, run_cancellable
 
@@ -26,6 +26,8 @@ def short_label(name: str) -> str:
 class EspeakEngine(TTSEngine):
     def __init__(self) -> None:
         super().__init__(name="eSpeak-NG", output_ext="wav")
+        self.about = "A formant synthesizer: extremely fast and very clear, even at high speeds, but sounds robotic."
+        self.quality = 2
         self._voices: Optional[List[Voice]] = None
 
     def check_dependencies(self) -> List[str]:
@@ -71,6 +73,16 @@ class EspeakEngine(TTSEngine):
                 voices.append((voice_id, label))
         self._voices = voices
         return voices
+
+    def describe_voice(self, voice_id: Optional[str]) -> Dict[str, str]:
+        label = dict(self.list_voices()).get(voice_id or "", voice_id or "default")
+        gender = "Female" if "female" in label else "Male" if "male" in label else "—"
+        accent = label.split(" (")[0]
+        details = {"Gender": gender, "Accent": accent, "Runs": "Offline, on this computer",
+                   "Audio": "WAV, 22 kHz mono", "Voice code": voice_id or "default"}
+        if voice_id and "+" in voice_id:
+            details["Note"] = "eSpeak's female variant of this accent"
+        return details
 
     def synthesize(
         self,

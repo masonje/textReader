@@ -4,7 +4,7 @@ import glob
 import os
 import shutil
 import threading
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from .base import TTSEngine, Voice, run_cancellable
 
@@ -14,6 +14,8 @@ VOICE_DIRS = ["/usr/share/festival/voices", "/usr/lib/festival/voices", "/usr/lo
 class FestivalEngine(TTSEngine):
     def __init__(self) -> None:
         super().__init__(name="Festival", output_ext="wav")
+        self.about = "The Festival Speech Synthesis System from the University of Edinburgh. Diphone voices: fast, intelligible, and robotic."
+        self.quality = 1
 
     def check_dependencies(self) -> List[str]:
         missing: List[str] = []
@@ -31,6 +33,13 @@ class FestivalEngine(TTSEngine):
                     speaker, _, kind = name.partition("_")
                     voices.append((name, f"{speaker.upper()} ({kind})" if kind else speaker))
         return voices
+
+    def describe_voice(self, voice_id: Optional[str]) -> Dict[str, str]:
+        name = voice_id or "default"
+        speaker, _, kind = name.partition("_")
+        return {"Voice": speaker.upper(), "Type": kind or "—", "Gender": "Male" if speaker in ("kal", "ked", "rab", "don") else "—",
+                "Accent": "American English" if speaker in ("kal", "ked") else "—",
+                "Runs": "Offline, on this computer", "Audio": "WAV, 16 kHz mono" if "16k" in name or speaker == "kal" else "WAV"}
 
     def synthesize(
         self,

@@ -5,6 +5,7 @@ repository the first time it's used, then kept in ~/.textReader/voices/piper.
 """
 from __future__ import annotations
 
+import json
 import os
 import threading
 import urllib.request
@@ -71,6 +72,9 @@ def _download(name: str, cancel_event: Optional[threading.Event]) -> None:
 class PiperEngine(TTSEngine):
     def __init__(self) -> None:
         super().__init__(name="Piper", output_ext="wav")
+        self.about = ("Fast neural voices that run entirely on your computer (Piper, from the Open Home Foundation). "
+                      "Each voice is a separate ~63 MB download.")
+        self.quality = 4
 
     def check_dependencies(self) -> List[str]:
         try:
@@ -86,6 +90,35 @@ class PiperEngine(TTSEngine):
                 label += " · download"
             result.append((voice_id, label))
         return result
+
+    def describe_voice(self, voice_id: Optional[str]) -> Dict[str, str]:
+        name = voice_id if voice_id in _VOICE_IDS else VOICES[0][0]
+        label = dict(VOICES)[name]
+        speaker, _, rest = label.partition(" (")
+        region, _, gender = rest.rstrip(")").partition(", ")
+        quality = name.rsplit("-", 1)[1]
+        details = {"Speaker": speaker, "Gender": gender.capitalize() or "—", "Accent": region or "—",
+                   "Runs": "Offline, on this computer", "Model": name, "Model quality": quality}
+        model = _model_path(name)
+        if os.path.exists(model):
+            details["Download"] = f"Downloaded ({os.path.getsize(model) / 1e6:.0f} MB)"
+            try:
+                config = json.loads(open(model + ".json").read())
+                rate = config.get("audio", {}).get("sample_rate")
+                if rate:
+                    details["Audio"] = f"WAV, {rate / 1000:g} kHz mono"
+                if config.get("dataset"):
+                    details["Trained on"] = config["dataset"]
+            except Exception:
+                pass
+        else:
+            details["Download"] = "Not downloaded yet (about 63 MB, on first use)"
+            details["Audio"] = "WAV, 22.05 kHz mono"
+        return details
+
+    def voice_ready(self, voice_id: Optional[str]) -> bool:
+        name = voice_id if voice_id in _VOICE_IDS else VOICES[0][0]
+        return os.path.exists(_model_path(name)) and name in _loaded
 
     def synthesize(
         self,
