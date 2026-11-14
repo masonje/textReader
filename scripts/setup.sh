@@ -16,6 +16,7 @@ sudo apt-get install -y \
 	python3-venv \
 	python3-tk \
 	ffmpeg \
+	libmpv2 \
 	xclip \
 	espeak-ng \
 	festival \

@@ -20,7 +20,7 @@ import tkinter as tk
 from tkinter import ttk
 from tkinter import messagebox
 
-from . import __version__, options, pronunciation, word_timing
+from . import __version__, options, player, pronunciation, word_timing
 from .engines import get_engine, list_engines
 from .engines.base import SynthesisCancelled, run_cancellable
 from .hotkeys import (DEFAULT_HOTKEYS, HOTKEY_LABELS, HOTKEY_ORDER, hotkey_hint, normalize_hotkey_part,
@@ -262,10 +262,8 @@ reading_lock = threading.Lock()
 # instead of starting audio after the user already pressed Stop.
 playback_generation = 0
 audio_preparing = False  # True while audio is being converted for playback
-playback_start_time = None
-playback_pause_start = None
-playback_pause_accum = 0.0
-current_audio_duration = 0.0
+audio_out = None  # the player (see player.py), created in main()
+current_audio_duration = 0.0  # length of the file being played, at normal speed
 current_progress = 0.0
 taskbar_icon_photo = None
 engine_missing_deps = False
@@ -479,15 +477,12 @@ def update_reading_timeline(audio_path, duration):
         print(f"🐛 [DEBUG] Word timeline ready: {len(refined)} words over {duration:.1f}s")
 
 def playback_position():
-    """Seconds of audio played so far, or None when nothing is loaded."""
-    if playback_start_time is None:
-        return None
-    now = playback_pause_start if (is_paused and playback_pause_start is not None) else time.monotonic()
-    return max(0.0, now - playback_start_time - playback_pause_accum)
+    """Seconds into the audio file (at normal speed), or None when nothing is loaded."""
+    return audio_out.position() if audio_out is not None else None
 
 def play_audio(file_to_play=None):
     """Play the generated audio file at the selected speed"""
-    global playback_start_time, playback_pause_start, playback_pause_accum, current_audio_duration, audio_preparing
+    global current_audio_duration, audio_preparing, is_paused
     generation = playback_generation
     stopped = lambda: generation != playback_generation or not is_running
     audio_preparing = True
@@ -497,34 +492,12 @@ def play_audio(file_to_play=None):
         if not wait_for_audio_file(file_to_play, 20):
             print("⚠️ Audio file not ready for playback")
             return
-        # Adjust speed for MP3 only
-        if playback_speed != 1.0:
-            temp_speed_file = str(SETTINGS_DIR / ("clipboard_speech_speed" + os.path.splitext(file_to_play)[1]))
-            try:
-                run_cancellable(
-                    ["ffmpeg", "-y", "-loglevel", "error", "-i", file_to_play,
-                     "-filter:a", f"atempo={playback_speed}", temp_speed_file],
-                    cancel_check=stopped,
-                )
-                file_to_play = temp_speed_file
-            except SynthesisCancelled:
-                return
-            except Exception as e:
-                print(f"⚠️ Speed change failed, playing at normal speed: {e}")
-        if stopped():
-            return  # Stop was pressed while the audio was being prepared
-        pygame.mixer.music.load(file_to_play)
         current_audio_duration = get_audio_duration(file_to_play)
-        if stopped():
-            return
-        playback_start_time = time.monotonic()
-        playback_pause_start = None
-        playback_pause_accum = 0.0
-        pygame.mixer.music.play()
+        is_paused = False
+        if not audio_out.play(file_to_play, playback_speed, cancel_check=stopped) or stopped():
+            return  # Stop was pressed while the audio was being prepared
         audio_preparing = False
         update_reading_timeline(file_to_play, current_audio_duration)
-        while pygame.mixer.music.get_busy() and is_running and not is_paused and not stopped():
-            time.sleep(0.1)
     except Exception as e:
         print(f"Error playing audio: {e}")
     finally:
@@ -533,66 +506,45 @@ def play_audio(file_to_play=None):
 
 def on_play():
     """Resume/play reading"""
-    global is_paused, playback_pause_start, playback_pause_accum
-
-    if is_paused and playback_start_time is not None:
-        # Resume paused playback from where it left off
-        # (pygame reports get_busy() == False while paused, so check our own state)
-        pygame.mixer.music.unpause()
+    global is_paused
+    if is_paused and audio_out.busy():
+        audio_out.resume()
         is_paused = False
-        if playback_pause_start is not None:
-            playback_pause_accum += time.monotonic() - playback_pause_start
-            playback_pause_start = None
         print("▶ Resumed from pause")
     else:
-        # Start fresh playback from beginning, honoring speed
-        def threaded_play():
-            play_audio()
-        threading.Thread(target=threaded_play, daemon=True).start()
+        # Start fresh playback from the beginning
         is_paused = False
+        threading.Thread(target=play_audio, daemon=True).start()
+        refresh_selection_lock()
         print("▶ Playing")
 
 def on_pause():
     """Pause/resume current playback"""
-    global is_paused, playback_pause_start, playback_pause_accum
-    if pygame.mixer.music.get_busy():
-        if is_paused:
-            pygame.mixer.music.unpause()
-            is_paused = False
-            if playback_pause_start is not None:
-                playback_pause_accum += time.monotonic() - playback_pause_start
-                playback_pause_start = None
-            print("▶ Resumed")
-        else:
-            is_paused = True
-            playback_pause_start = time.monotonic()
-            pygame.mixer.music.pause()
-            print("⏸ Paused")
+    global is_paused
+    if not audio_out.busy():
+        print("⚠️ Nothing playing to pause")
     elif is_paused:
-        pygame.mixer.music.unpause()
+        audio_out.resume()
         is_paused = False
-        if playback_pause_start is not None:
-            playback_pause_accum += time.monotonic() - playback_pause_start
-            playback_pause_start = None
         print("▶ Resumed")
     else:
-        print("⚠️ Nothing playing to pause")
+        audio_out.pause()
+        is_paused = True
+        print("⏸ Paused")
 
 def on_stop():
     """Stop and reset playback"""
-    global is_paused, playback_start_time, playback_pause_start, playback_pause_accum, current_audio_duration, current_progress
+    global is_paused, current_audio_duration, current_progress
     global playback_generation, audio_preparing
     playback_generation += 1
     audio_preparing = False
     is_paused = False
-    playback_start_time = None
-    playback_pause_start = None
-    playback_pause_accum = 0.0
     current_audio_duration = 0.0
     current_progress = 0.0
     if current_build is not None:
         current_build.set()
-    pygame.mixer.music.stop()
+    audio_out.stop()
+    refresh_selection_lock()
     print("⏹ Stopped")
 
 def toggle_debug():
@@ -602,6 +554,12 @@ def toggle_debug():
     save_settings()
     status = "ON" if debug_mode else "OFF"
     print(f"🐛 Debug mode: {status}")
+
+def refresh_selection_lock():
+    """Update the Engine/Voice lock now instead of at the next status check (any thread)."""
+    lock = getattr(control_window, "lock_selection", None)
+    if lock is not None:
+        main_thread_calls.put(lock)
 
 def start_build(text):
     """Synthesize `text` in the background with a cancellable progress dialog.
@@ -615,6 +573,7 @@ def start_build(text):
 
     cancel_event = threading.Event()
     current_build = cancel_event
+    refresh_selection_lock()
     build_counter += 1
     engine_name = tts_engine
     voice = engine_voices.get(engine_name)
@@ -816,6 +775,26 @@ def start_build(text):
     threading.Thread(target=worker, daemon=True).start()
     control_window.after(100, poll)
 
+def get_clipboard_text(timeout=2.0):
+    """Return the clipboard text, or "" if the clipboard doesn't answer in time.
+
+    The program that owns the clipboard has to hand the text over. If it is busy
+    or stuck, pyperclip waits forever and freezes the app, so on Linux xclip is
+    run with a time limit.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(["xclip", "-selection", "clipboard", "-o"],
+                                capture_output=True, timeout=timeout, check=False)
+        if result.returncode != 0:
+            return ""  # empty clipboard, or it holds something that isn't text
+        return result.stdout.decode("utf-8", errors="replace")
+    except subprocess.TimeoutExpired:
+        print("⚠️ The clipboard didn't answer (the app you copied from may be busy). Try copying again.")
+        return ""
+    except FileNotFoundError:
+        return pyperclip.paste()  # no xclip: macOS, Windows, or Wayland without it
+
 def read_selected_text():
     """Read the currently selected text from clipboard"""
     try:
@@ -840,7 +819,7 @@ def read_selected_text():
         except Exception:
             pass
         time.sleep(0.1)  # Give clipboard time to update
-        current_text = pyperclip.paste()
+        current_text = get_clipboard_text()
         if debug_mode:
             print(f"🐛 [DEBUG] Raw clipboard content:")
             print(f"🐛 [DEBUG] {repr(current_text)}\n")
@@ -871,8 +850,8 @@ def read_selected_text():
                         t = sample_index / sample_rate
                         s = 0.5 * math.sin(2 * math.pi * freq * t)
                         wf.writeframes(struct.pack('<h', int(s * 32767)))
-                pygame.mixer.music.load(str(beep_path))
-                pygame.mixer.music.play()
+                beep = pygame.mixer.Sound(str(beep_path))
+                beep.play()
                 time.sleep(duration)
                 if beep_path.exists():
                     beep_path.unlink()
@@ -1082,7 +1061,7 @@ def create_control_window():
     voice_dropdown = ttk.Combobox(form, textvariable=voice_var, values=[], state="disabled", width=14)
     voice_dropdown.grid(row=1, column=1, columnspan=2, sticky="ew", pady=3)
     widen_popdown(voice_dropdown)
-    voice_choices = {"engine": None, "ids": []}
+    voice_choices = {"engine": None, "ids": [], "ready": False}
 
     def show_voices(engine_name, voices):
         """Fill the Voice list for engine_name (main thread)."""
@@ -1092,18 +1071,29 @@ def create_control_window():
         voices = enabled_voices(engine_name, voices)
         voice_choices["ids"] = [voice_id for voice_id, _ in voices]
         if not voices:
+            voice_choices["ready"] = False
             voice_dropdown.configure(values=["Default"], state="disabled")
             voice_var.set("Default")
             return
         saved = engine_voices.get(engine_name)
         index = voice_choices["ids"].index(saved) if saved in voice_choices["ids"] else 0
         engine_voices[engine_name] = voice_choices["ids"][index]
-        voice_dropdown.configure(values=[label for _, label in voices], state="readonly")
+        voice_choices["ready"] = True
+        voice_dropdown.configure(values=[label for _, label in voices])
         voice_dropdown.current(index)
+        lock_selection()
+
+    def lock_selection():
+        """Grey out Engine and Voice while audio is being built, played or paused."""
+        reading = current_build is not None or audio_preparing or (audio_out is not None and audio_out.busy())
+        engine_dropdown.configure(state="disabled" if reading else "readonly")
+        voice_dropdown.configure(state="readonly" if voice_choices.get("ready") and not reading else "disabled")
+    window.lock_selection = lock_selection
 
     def load_voices(engine_name, show_loading=True):
         """List the engine's voices in the background (some engines are slow to list)."""
         if show_loading:
+            voice_choices["ready"] = False
             voice_dropdown.configure(values=[], state="disabled")
             voice_var.set("Loading voices…")
         def worker():
@@ -1136,6 +1126,8 @@ def create_control_window():
         v = round(float(val) * 10) / 10.0
         if abs(v - speed_var.get()) > 1e-6:
             speed_var.set(v)
+        if v != playback_speed and audio_out is not None:
+            audio_out.set_speed(v)
         playback_speed = v
         save_settings()
         slider_value_label.config(text=f"{playback_speed:.1f}x")
@@ -1180,9 +1172,11 @@ def create_control_window():
         except Exception:
             return
         position = playback_position()
-        if position is not None and (pygame.mixer.music.get_busy() or is_paused) and current_audio_duration > 0:
+        if position is not None and current_audio_duration > 0:
+            # Shown in real time, so it follows the speed setting
             position = min(position, current_audio_duration)
-            time_label.config(text=f"{format_time(position)} / {format_time(current_audio_duration)}")
+            time_label.config(text=f"{format_time(position / playback_speed)} / "
+                                   f"{format_time(current_audio_duration / playback_speed)}")
         else:
             time_label.config(text="")
         window.after(250, update_time_label)
@@ -1348,7 +1342,7 @@ def create_control_window():
             if voice_used_label.cget("text") != used:
                 voice_used_label.config(text=used)
             position = playback_position()
-            playing = pygame.mixer.music.get_busy() or is_paused
+            playing = audio_out.busy()
             with reading_lock:
                 timeline = reading_timeline
             if playing and position is not None and timeline:
@@ -1449,21 +1443,21 @@ def create_control_window():
             window.after(500, update_status)
             return
         busy_preparing = current_build is not None or audio_preparing
-        if busy_preparing and not pygame.mixer.music.get_busy() and not is_paused:
+        lock_selection()
+        if busy_preparing and not audio_out.busy():
             status_label.config(text="Building audio…" if current_build is not None else "Preparing audio…")
             speed_slider.state(["disabled"])
             progress_var.set(0.0)
-        elif pygame.mixer.music.get_busy() or is_paused:
+        elif audio_out.busy():
             if is_paused:
                 status_label.config(text="Paused")
             else:
                 status_label.config(text="Playing")
-            speed_slider.state(["disabled"])
-            if playback_start_time and current_audio_duration > 0:
-                if not is_paused:
-                    now = time.monotonic()
-                    elapsed = now - playback_start_time - playback_pause_accum
-                    current_progress = max(0.0, min(100.0, (elapsed / current_audio_duration) * 100.0))
+            # With mpv the speed can change while reading; otherwise only between reads
+            speed_slider.state(["!disabled"] if audio_out.live_speed else ["disabled"])
+            position = playback_position()
+            if position is not None and current_audio_duration > 0:
+                current_progress = max(0.0, min(100.0, (position / current_audio_duration) * 100.0))
                 progress_var.set(current_progress)
             else:
                 progress_var.set(0.0)
@@ -1475,7 +1469,7 @@ def create_control_window():
             play_btn.state(["!disabled"])
         else:
             play_btn.state(["disabled"])
-        if pygame.mixer.music.get_busy() or (is_paused and has_audio_file()):
+        if audio_out.busy():
             pause_btn.state(["!disabled"])
             stop_btn.state(["!disabled"])
         else:
@@ -1613,8 +1607,10 @@ listener = None
 
 def main():
     """Start the background threads and the control window; clean up on exit."""
-    global is_running, listener
-    pygame.mixer.init()
+    global is_running, listener, audio_out
+    pygame.mixer.init()  # used for voice samples and the "nothing to read" beep
+    audio_out = player.create_player(str(SETTINGS_DIR))
+    print(f"🔊 Playback: {audio_out.name}" + ("" if audio_out.live_speed else " (speed changes apply to the next read)"))
 
     # Remove any leftover audio files from previous runs
     cleanup_audio_files()
@@ -1654,6 +1650,7 @@ def main():
     print("\nProgram stopped.")
     is_running = False
     listener.stop()
+    audio_out.close()
     if os.path.exists(audio_file_mp3):
         os.remove(audio_file_mp3)
     if os.path.exists(audio_file_wav):
