@@ -1,5 +1,5 @@
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 # Dependency check
 import sys
@@ -76,6 +76,7 @@ if "--check-engines" in sys.argv[1:]:
             print(f"{name:10} ERROR: {e}")
     sys.exit(0)
 import word_timing
+import pronunciation
 
 # Initialize pygame mixer for audio playback
 pygame.mixer.init()
@@ -195,6 +196,7 @@ def default_settings():
         "voice_stats": {},
         "voice_ratings": {},
         "surprise_voice": False,
+        "pronunciations": [],
     }
 
 def normalize_loaded_hotkeys(raw_hotkeys):
@@ -225,7 +227,8 @@ def save_settings():
                        "disabled_engines": sorted(disabled_engines),
                        "disabled_voices": {k: sorted(v) for k, v in disabled_voices.items() if v},
                        "voice_stats": voice_stats, "voice_ratings": voice_ratings,
-                       "surprise_voice": surprise_voice}, f, indent=2)
+                       "surprise_voice": surprise_voice,
+                       "pronunciations": pronunciations}, f, indent=2)
     except Exception:
         pass
 
@@ -256,6 +259,8 @@ voice_stats = settings.get("voice_stats", {}) or {}
 # The user's own star ratings ("engine|voice" -> 1-5); engines provide defaults
 voice_ratings = settings.get("voice_ratings", {}) or {}
 surprise_voice = bool(settings.get("surprise_voice", False))  # pick a random voice for each read
+# Pronunciation rules: how to say particular words, names and symbols (see pronunciation.py)
+pronunciations = pronunciation.clean_rules(settings.get("pronunciations", []))
 
 # Voice lists by engine, filled in the background so a surprise pick never waits on a slow engine
 voice_cache = {}
@@ -364,6 +369,7 @@ if not isinstance(engine_voices, dict):
 # the text changes so the UI knows to reload it.
 reading_text = ""
 reading_spans = []      # (start, end) character offsets per word
+reading_spoken = None   # what is said for each word after pronunciation rules (None: as written)
 reading_timeline = []   # estimated start time (s) per word
 reading_serial = 0
 reading_lock = threading.Lock()
@@ -554,12 +560,17 @@ def get_audio_duration(file_path):
     except Exception:
         return 0.0
 
-def set_reading_text(text):
-    """Record the text that is about to be read aloud (any thread)."""
-    global reading_text, reading_spans, reading_timeline, reading_serial
+def set_reading_text(text, edits=()):
+    """Record the text that is about to be read aloud (any thread).
+
+    `edits` are the pronunciation changes made to it, so word timing follows
+    what is really said.
+    """
+    global reading_text, reading_spans, reading_spoken, reading_timeline, reading_serial
     with reading_lock:
         reading_text = text
         reading_spans = word_timing.tokenize(text)
+        reading_spoken = pronunciation.spoken_words(text, reading_spans, edits) if edits else None
         reading_timeline = []
         reading_serial += 1
 
@@ -567,16 +578,16 @@ def update_reading_timeline(audio_path, duration):
     """Estimate when each word is spoken in `audio_path` (call from a worker thread)."""
     global reading_timeline
     with reading_lock:
-        text, spans, serial = reading_text, reading_spans, reading_serial
+        text, spans, spoken, serial = reading_text, reading_spans, reading_spoken, reading_serial
     if not spans or duration <= 0:
         return
     # A quick even spread first, so highlighting starts at once...
-    rough = word_timing.build_timeline(text, duration, [], spans)
+    rough = word_timing.build_timeline(text, duration, [], spans, spoken)
     with reading_lock:
         if serial == reading_serial:
             reading_timeline = rough
     # ...then refine it using the pauses actually found in the audio
-    refined = word_timing.build_timeline(text, duration, word_timing.detect_silences(audio_path), spans)
+    refined = word_timing.build_timeline(text, duration, word_timing.detect_silences(audio_path), spans, spoken)
     with reading_lock:
         if serial == reading_serial:
             reading_timeline = refined
@@ -790,8 +801,14 @@ def start_build(text):
                 if voices_changed_callback is not None:
                     voices_changed_callback(engine_name)
             ready = engine.voice_ready(voice)  # False: this build includes a download or model load
+            spoken, edits = pronunciation.apply(text, pronunciations, engine_name)
+            job["edits"] = edits
+            if not spoken.strip():
+                return "Nothing left to read: your pronunciation rules skip all of this text"
+            if edits and debug_mode:
+                print(f"🐛 [DEBUG] Pronunciation: {len(edits)} change(s) → {spoken[:200]!r}")
             started = time.monotonic()
-            engine.synthesize(text, temp_path, cancel_event, voice=voice)
+            engine.synthesize(spoken, temp_path, cancel_event, voice=voice)
             build_seconds = time.monotonic() - started
             if cancel_event.is_set():
                 raise SynthesisCancelled()
@@ -883,7 +900,7 @@ def start_build(text):
             close_dialog()
             try:
                 os.replace(job["temp"], final_path)
-                set_reading_text(text)
+                set_reading_text(text, job.get("edits") or ())
             except Exception as e:
                 print(f"Error saving audio: {e}")
                 remove_temp()
@@ -1097,6 +1114,18 @@ def apply_theme(root):
               indicatorbackground=[("selected", p["accent"]), ("active", p["hover"])],
               upperbordercolor=[("selected", p["accent"])], lowerbordercolor=[("selected", p["accent"])],
               foreground=[("disabled", p["disabled"])])
+    style.configure("TRadiobutton", background=p["bg"], foreground=p["fg"], focuscolor=p["bg"],
+                    indicatorbackground=p["field"], indicatorforeground=p["accent_fg"],
+                    upperbordercolor=p["border"], lowerbordercolor=p["border"], indicatormargin=(0, 0, 8, 0))
+    style.map("TRadiobutton",
+              background=[("active", p["bg"])],
+              indicatorbackground=[("selected", p["accent"]), ("active", p["hover"])],
+              upperbordercolor=[("selected", p["accent"])], lowerbordercolor=[("selected", p["accent"])],
+              foreground=[("disabled", p["disabled"])])
+    style.configure("TEntry", fieldbackground=p["field"], foreground=p["fg"], bordercolor=p["border"],
+                    lightcolor=p["field"], darkcolor=p["field"], insertcolor=p["fg"], padding=(6, 3))
+    style.map("TEntry", bordercolor=[("focus", p["accent"])],
+              fieldbackground=[("disabled", p["surface"])], foreground=[("disabled", p["disabled"])])
     style.configure("TCombobox", fieldbackground=p["field"], background=p["button"], foreground=p["fg"],
                     arrowcolor=p["fg"], bordercolor=p["border"], lightcolor=p["field"],
                     darkcolor=p["field"], padding=(6, 3))
@@ -1177,6 +1206,42 @@ def themed_toplevel(parent, title):
     content = ttk.Frame(dialog, padding=14)
     content.pack(fill=tk.BOTH, expand=True)
     return dialog, content
+
+def play_sample(engine_name, voice_id, text, report):
+    """Speak `text` with one voice, outside the normal read (worker thread).
+
+    `report(message)` is called on the main thread with progress or errors
+    ("" when the sample has finished playing).
+    """
+    import tempfile
+    say = lambda message: main_thread_calls.put(lambda: report(message))
+    tmp = None
+    try:
+        engine = get_engine(engine_name)
+        missing = engine.check_dependencies()
+        if missing:
+            say(f"{engine_name} isn't ready: missing {', '.join(missing)}")
+            return
+        download = engine.voice_download_info(voice_id)
+        if download and not download["downloaded"]:
+            say("Downloading this voice first…")
+        tmp = tempfile.mkdtemp(prefix="textreader-sample-")
+        path = os.path.join(tmp, "sample." + engine.output_ext)
+        engine.synthesize(text, path, threading.Event(), voice=voice_id)
+        wav = path
+        if not path.endswith(".wav"):
+            wav = os.path.join(tmp, "sample.wav")
+            run_cancellable(["ffmpeg", "-y", "-loglevel", "error", "-i", path, wav], timeout=30)
+        sound = pygame.mixer.Sound(wav)
+        say("Playing…")
+        sound.play()
+        time.sleep(sound.get_length() + 0.3)
+        say("")
+    except Exception as e:
+        say(f"Couldn't play the sample: {e}")
+    finally:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 def create_control_window():
     global control_window, playback_speed, hotkeys, engine_missing_deps
@@ -1557,6 +1622,8 @@ def create_control_window():
                     command=on_debug_toggle).grid(row=1, column=0, columnspan=2, sticky="w", pady=3)
     manage_btn = ttk.Button(options_form, text="Engines & Voices…", command=lambda: open_engine_manager())
     manage_btn.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 3))
+    ttk.Button(options_form, text="Pronunciations…", command=lambda: open_pronunciation_editor()) \
+        .grid(row=3, column=0, columnspan=2, sticky="ew", pady=3)
 
     def refresh_engine_choices():
         """Re-apply enable/disable settings to the Engine and Voice lists."""
@@ -2096,6 +2163,307 @@ def create_control_window():
         # Start with the current engine selected
         tree.selection_set(engine_items.get(tts_engine, engine_items[all_names[0]]))
 
+    pron_editor = {"open": None}  # the open editor's "load a word" function, if any
+
+    def open_pronunciation_editor(word=None):
+        """Add, change and test rules for how words, names and symbols are read aloud."""
+        global pronunciations
+        if pron_editor["open"] is not None:
+            pron_editor["open"](word)  # already open: bring it forward with this word
+            return
+        dialog, body = themed_toplevel(window, "Pronunciations")
+        dialog.transient(window)
+        dialog.resizable(True, True)
+        dialog.minsize(860, 0)
+        ttk.Label(body, text="Change how words, names, abbreviations and symbols are read aloud. "
+                             "Click a rule's box to turn it on or off. Tip: right-click a word in "
+                             "Now Reading to add it here.", wraplength=780).pack(anchor="w")
+
+        panes = ttk.Frame(body)
+        panes.pack(fill=tk.BOTH, expand=True, pady=(10, 8))
+        tree_frame = ttk.Frame(panes)
+        tree_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree = ttk.Treeview(tree_frame, columns=("say", "engine"), show="tree headings",
+                            selectmode="browse", height=14)
+        tree.heading("#0", text="Text", anchor="w")
+        tree.heading("say", text="Read as", anchor="w")
+        tree.heading("engine", text="Engines", anchor="w")
+        tree.column("#0", width=170, stretch=True)
+        tree.column("say", width=190, stretch=True)
+        tree.column("engine", width=90, stretch=False)
+        scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree.tag_configure("off", foreground=PALETTE["disabled"])
+
+        ttk.Separator(panes, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=12)
+        form = ttk.Frame(panes)
+        form.pack(side=tk.LEFT, fill=tk.Y)
+        ttk.Frame(form, width=330, height=0).pack()  # keeps the form at a steady width
+
+        form_title = ttk.Label(form, text="New rule", style="Header.TLabel")
+        form_title.pack(anchor="w", pady=(0, 8))
+        ttk.Label(form, text="Word, name, letters or symbol:").pack(anchor="w")
+        text_var = tk.StringVar()
+        text_entry = ttk.Entry(form, textvariable=text_var)
+        text_entry.pack(fill=tk.X, pady=(2, 10))
+
+        ttk.Label(form, text="How to read it:").pack(anchor="w")
+        mode_var = tk.StringVar(value="say")
+        say_var = tk.StringVar()
+        ttk.Radiobutton(form, text="Say it as:", value="say", variable=mode_var,
+                        command=lambda: update_form()).pack(anchor="w", pady=(4, 0))
+        say_entry = ttk.Entry(form, textvariable=say_var)
+        say_entry.pack(fill=tk.X, padx=(26, 0), pady=(2, 0))
+        ttk.Label(form, text="Spell it how it sounds, e.g. Nguyen → win",
+                  style="Muted.TLabel").pack(anchor="w", padx=(26, 0))
+        ttk.Radiobutton(form, text="Spell it out letter by letter", value="spell", variable=mode_var,
+                        command=lambda: update_form()).pack(anchor="w", pady=(6, 0))
+        spell_hint = ttk.Label(form, text="", style="Muted.TLabel")
+        spell_hint.pack(anchor="w", padx=(26, 0))
+        ttk.Radiobutton(form, text="Don't read it (skip it)", value="skip", variable=mode_var,
+                        command=lambda: update_form()).pack(anchor="w", pady=(6, 10))
+
+        whole_var = tk.BooleanVar(value=True)
+        case_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(form, text="Whole word only", variable=whole_var).pack(anchor="w", pady=2)
+        ttk.Checkbutton(form, text="Match upper/lower case exactly", variable=case_var).pack(anchor="w", pady=2)
+        engine_row = ttk.Frame(form)
+        engine_row.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(engine_row, text="Use with:").pack(side=tk.LEFT)
+        all_engines_label = "All engines"
+        engine_choice = tk.StringVar(value=all_engines_label)
+        engine_combo = ttk.Combobox(engine_row, textvariable=engine_choice, state="readonly", width=16,
+                                    values=[all_engines_label] + sorted(list_engines(), key=str.lower))
+        engine_combo.configure(postcommand=lambda: widen_popdown(engine_combo))
+        engine_combo.pack(side=tk.LEFT, padx=(8, 0), fill=tk.X, expand=True)
+
+        hear_row = ttk.Frame(form)
+        hear_row.pack(fill=tk.X, pady=(12, 0))
+        hear_label = ttk.Label(hear_row, text="Hear it:")
+        hear_label.pack(side=tk.LEFT)
+        hear_before = ttk.Button(hear_row, text="As written", command=lambda: hear(False))
+        hear_before.pack(side=tk.LEFT, padx=(8, 0))
+        hear_after = ttk.Button(hear_row, text="With this rule", command=lambda: hear(True))
+        hear_after.pack(side=tk.LEFT, padx=(6, 0))
+        status = ttk.Label(form, text="", style="Muted.TLabel", wraplength=320)
+        status.pack(anchor="w", pady=(6, 0))
+
+        form_buttons = ttk.Frame(form)
+        form_buttons.pack(side=tk.BOTTOM, fill=tk.X, pady=(12, 0))
+        delete_btn = ttk.Button(form_buttons, text="Delete", command=lambda: delete_rule())
+        delete_btn.pack(side=tk.LEFT)
+        save_btn = ttk.Button(form_buttons, text="Add rule", style="Accent.TButton", command=lambda: save_rule())
+        save_btn.pack(side=tk.RIGHT)
+
+        buttons = ttk.Frame(body)
+        buttons.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(buttons, text="New rule", command=lambda: new_rule()).pack(side=tk.LEFT)
+        ttk.Button(buttons, text="Close", style="Accent.TButton", width=8,
+                   command=lambda: close()).pack(side=tk.RIGHT)
+
+        state = {"editing": None, "playing": False}  # index of the rule in the form (None: new)
+        items = {}  # tree item -> rule index
+
+        def engine_text(rule):
+            return rule.get("engine") or "All"
+
+        def redraw(select_index=None):
+            tree.delete(*tree.get_children())
+            items.clear()
+            order = sorted(range(len(pronunciations)), key=lambda i: str(pronunciations[i]["text"]).lower())
+            for i in order:
+                rule = pronunciations[i]
+                on = rule.get("enabled", True)
+                item = tree.insert("", tk.END, text=f"{'☑' if on else '☐'}  {rule['text']}",
+                                   values=(pronunciation.describe(rule), engine_text(rule)),
+                                   tags=() if on else ("off",))
+                items[item] = i
+                if i == select_index:
+                    tree.selection_set(item)
+                    tree.see(item)
+            if not pronunciations:
+                tree.insert("", tk.END, text="  No rules yet", values=("Add one on the right", ""), tags=("off",))
+
+        def form_rule():
+            rule = pronunciation.new_rule(text_var.get().strip(), mode_var.get(), say_var.get().strip())
+            rule["whole_word"] = bool(whole_var.get())
+            rule["match_case"] = bool(case_var.get())
+            rule["engine"] = "" if engine_choice.get() == all_engines_label else engine_choice.get()
+            if state["editing"] is not None:
+                rule["enabled"] = pronunciations[state["editing"]].get("enabled", True)
+            return rule
+
+        def update_form(*_):
+            say_entry.state(["!disabled"] if mode_var.get() == "say" else ["disabled"])
+            word = text_var.get().strip()
+            spelled = pronunciation.spell_out(word) if word else ""
+            spell_hint.config(text=f"→ {spelled}" if spelled else "e.g. SQL → ess cue el")
+            editing = state["editing"] is not None
+            form_title.config(text="Edit rule" if editing else "New rule")
+            save_btn.config(text="Save rule" if editing else "Add rule")
+            delete_btn.state(["!disabled"] if editing else ["disabled"])
+            can_hear = bool(word) and not state["playing"]
+            for b in (hear_before, hear_after):
+                b.state(["!disabled"] if can_hear else ["disabled"])
+        text_var.trace_add("write", update_form)
+
+        def load(index):
+            state["editing"] = index
+            rule = pronunciations[index] if index is not None else pronunciation.new_rule()
+            text_var.set(rule["text"])
+            mode_var.set(rule["mode"])
+            say_var.set(rule.get("say", ""))
+            whole_var.set(rule.get("whole_word", True))
+            case_var.set(rule.get("match_case", False))
+            engine_choice.set(rule.get("engine") or all_engines_label)
+            status.config(text="", style="Muted.TLabel")
+            update_form()
+
+        def new_rule(word=None):
+            tree.selection_remove(tree.selection())
+            load(None)
+            if word:
+                text_var.set(word)
+                say_entry.focus_set()
+            else:
+                text_entry.focus_set()
+
+        def find_rule(word):
+            for i, rule in enumerate(pronunciations):
+                if str(rule["text"]).lower() == word.lower():
+                    return i
+            return None
+
+        def open_word(word=None):
+            """Show `word`'s rule, or start a new one for it."""
+            dialog.deiconify()
+            dialog.lift()
+            dialog.focus_force()
+            if not word:
+                return
+            index = find_rule(word)
+            if index is None:
+                new_rule(word)
+            else:
+                redraw(index)
+                load(index)
+                say_entry.focus_set()
+
+        def save_rule():
+            global pronunciations
+            rule = form_rule()
+            if not rule["text"]:
+                status.config(text="Type the word, letters or symbol to change.", style="Error.TLabel")
+                text_entry.focus_set()
+                return
+            if rule["mode"] == "say" and not rule["say"]:
+                status.config(text="Type how it should sound, or pick another option.", style="Error.TLabel")
+                say_entry.focus_set()
+                return
+            if rule["mode"] == "spell" and not pronunciation.spell_out(rule["text"]):
+                status.config(text="Nothing to spell: use letters or numbers.", style="Error.TLabel")
+                return
+            index = state["editing"]
+            if index is None:
+                # Same text for the same engines: update that rule instead of adding a twin
+                twin = next((i for i, r in enumerate(pronunciations)
+                             if r["text"] == rule["text"] and r.get("engine", "") == rule["engine"]), None)
+                if twin is not None:
+                    index = twin
+            if index is None:
+                pronunciations.append(rule)
+                index = len(pronunciations) - 1
+            else:
+                pronunciations[index] = rule
+            save_settings()
+            redraw(index)
+            load(index)
+            status.config(text="Saved. It's used from the next read.", style="Muted.TLabel")
+
+        def delete_rule():
+            index = state["editing"]
+            if index is None:
+                return
+            del pronunciations[index]
+            save_settings()
+            redraw()
+            new_rule()
+            status.config(text="Rule deleted.", style="Muted.TLabel")
+
+        def toggle(item):
+            index = items.get(item)
+            if index is None:
+                return
+            pronunciations[index]["enabled"] = not pronunciations[index].get("enabled", True)
+            save_settings()
+            redraw(index)
+
+        def on_click(event):
+            item = tree.identify_row(event.y)
+            if item and tree.identify_column(event.x) == "#0":
+                bbox = tree.bbox(item, "#0")
+                if bbox and event.x - bbox[0] < 40:
+                    toggle(item)
+
+        def on_select(_event=None):
+            sel = tree.selection()
+            if sel and items.get(sel[0]) is not None and items[sel[0]] != state["editing"]:
+                load(items[sel[0]])
+        tree.bind("<ButtonRelease-1>", on_click)
+        tree.bind("<<TreeviewSelect>>", on_select)
+        tree.bind("<space>", lambda _e: toggle(tree.focus()))
+        tree.bind("<Delete>", lambda _e: delete_rule())
+
+        def hear(with_rule):
+            word = text_var.get().strip()
+            if not word:
+                return
+            if pygame.mixer.music.get_busy() or current_build is not None or audio_preparing:
+                status.config(text="Stop the current reading first.", style="Muted.TLabel")
+                return
+            rule = form_rule()
+            name = rule["engine"] or tts_engine
+            if get_engine(name) is None:
+                return
+            sample = word
+            if with_rule:
+                rule["enabled"] = True
+                rule["whole_word"] = False  # the sample is just the word itself
+                sample, _ = pronunciation.apply(word, [rule], name)
+                if not sample.strip():
+                    status.config(text="With this rule it isn't read at all.", style="Muted.TLabel")
+                    return
+            voice_id = engine_voices.get(name)
+            state["playing"] = True
+            update_form()
+            status.config(text=f"Building with {name}…", style="Muted.TLabel")
+
+            def report(message):
+                if not dialog.winfo_exists():
+                    return
+                if not message or message.startswith("Couldn't") or "isn't ready" in message:
+                    state["playing"] = False
+                    update_form()
+                status.config(text=message, style="Error.TLabel" if message.startswith("Couldn't") else "Muted.TLabel")
+            threading.Thread(target=play_sample, args=(name, voice_id, sample, report), daemon=True).start()
+
+        def close():
+            pron_editor["open"] = None
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", close)
+        dialog.bind("<Escape>", lambda _e: close())
+        text_entry.bind("<Return>", lambda _e: save_rule())
+        say_entry.bind("<Return>", lambda _e: save_rule())
+        pron_editor["open"] = open_word
+        redraw()
+        if word:
+            open_word(word)
+        else:
+            new_rule()
+
     version_label = ttk.Label(content, text=f"Version {__version__}", style="Muted.TLabel")
     version_label.pack(pady=(12, 0))
 
@@ -2128,6 +2496,31 @@ def create_control_window():
     reading_view.tag_configure("spoken", foreground=p["muted"])
     reading_view.tag_configure("current", background=p["accent"], foreground=p["accent_fg"])
     reading_view.configure(state=tk.DISABLED)
+
+    def word_menu(event):
+        """Right-click a word (or a selection) to change how it's read."""
+        try:
+            word = reading_view.get(tk.SEL_FIRST, tk.SEL_LAST)
+        except tk.TclError:
+            index = reading_view.index(f"@{event.x},{event.y}")
+            word = reading_view.get(f"{index} wordstart", f"{index} wordend")
+            if "placeholder" in reading_view.tag_names(index):
+                word = ""
+        word = " ".join(word.split()).strip(".,;:!?\"'“”‘’()[]{}")
+        if not word or len(word) > 60:
+            return
+        menu = tk.Menu(reading_view, tearoff=0, background=PALETTE["field"], foreground=PALETTE["fg"],
+                       activebackground=PALETTE["accent"], activeforeground=PALETTE["accent_fg"],
+                       borderwidth=1, relief=tk.SOLID)
+        existing = any(str(r["text"]).lower() == word.lower() for r in pronunciations)
+        menu.add_command(label=f"{'Edit' if existing else 'Change'} how “{word}” is read…",
+                         command=lambda: open_pronunciation_editor(word))
+        menu.add_command(label="Pronunciations…", command=open_pronunciation_editor)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+    reading_view.bind("<Button-3>", word_menu)
 
     view_state = {"serial": None, "word": None}
 

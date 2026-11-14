@@ -1,7 +1,7 @@
 # Clipboard Reader
 Reads text aloud. Python version of text aloud mp3 to run on Linux, Windows, or macOS.
 
-**Version:** 1.5.0 — see [Changelog](#changelog) for what changed in each version.
+**Version:** 1.6.0 — see [Changelog](#changelog) for what changed in each version.
 
 ## Requirements
 
@@ -124,6 +124,7 @@ The main app (reader.py) only calls `get_engine()` and `synthesize()` and does n
 4. Copy the executable to your target system. Make sure ffmpeg is installed (see above).
 
 ## Features
+- **Pronunciations:** change how words, names, abbreviations and symbols are read aloud (Full view → Pronunciations…, or right-click a word in Now Reading). See [Pronunciations](#pronunciations).
 - **Surprise me:** tick "Surprise me with a random voice" (Full view, bottom left) and each read uses a random voice from the engines and voices you have turned on. Voices that would need a download first are skipped, and the same voice isn't picked twice in a row. The Now Reading header shows which voice was used. If the picked voice fails (for example, an online service doesn't answer), another engine is tried automatically.
 - Two views: **Compact** (just the controls, small enough to leave on screen) and **Full** (adds a panel showing the text being read, with the current word highlighted). Switch with the Full View ▸ / ◂ Compact button.
 - Reads clipboard text aloud
@@ -144,6 +145,10 @@ Settings are saved in `~/.textReader/settings.json`. The control window includes
 	"view_mode": "compact",
 	"full_window_size": "",
 	"surprise_voice": false,
+	"pronunciations": [
+		{"text": "SQL", "mode": "spell", "say": "", "whole_word": true, "match_case": false, "engine": "", "enabled": true},
+		{"text": "Nguyen", "mode": "say", "say": "win", "whole_word": true, "match_case": false, "engine": "", "enabled": true}
+	],
 	"hotkeys": {
 		"read_selected_text": "Win+Esc",
 		"play": "Win+Shift+R",
@@ -155,6 +160,19 @@ Settings are saved in `~/.textReader/settings.json`. The control window includes
 
 `theme` can be `"auto"` (follow the desktop's light/dark setting), `"dark"`, or `"light"`.
 `view_mode` is `"compact"` or `"full"`, and `full_window_size` remembers the Full view's size (for example `"840x460"`). Both are saved automatically.
+
+## Pronunciations
+Open **Pronunciations…** in the Full view (bottom left), or right-click a word (or a selection) in Now Reading and choose **Change how "word" is read…**. Each rule matches a word, name, letters or symbol and does one of:
+
+| Option | Example |
+|---|---|
+| **Say it as** — type how it sounds | Nguyen → "win", GIF → "jif", Rx → "prescription" |
+| **Spell it out** letter by letter | SQL → "ess cue el" |
+| **Don't read it** | footnote markers like `[1]` |
+
+Options per rule: **Whole word only** (on by default, so "cat" doesn't change "concatenate"; symbols such as `&` or `[1]` still match next to a word), **Match upper/lower case exactly**, and **Use with** all engines or just one. Click a rule's box to turn it on or off. **Hear it: As written / With this rule** plays the word with your current voice so you can compare before saving.
+
+Rules apply to every read (including Surprise me). Now Reading still shows your original text, and word highlighting is timed to what is actually said. With Debug mode on, the terminal shows the text sent to the voice. Rules are applied in one pass, longest first, and are saved as `pronunciations` in settings.json; the logic lives in [pronunciation.py](pronunciation.py).
 
 ## Word Highlighting (Full view)
 None of the TTS engines report when each word is spoken, so [word_timing.py](word_timing.py) estimates it:
@@ -177,6 +195,12 @@ In testing with gTTS, sentence starts landed within about 0.1 s of the real audi
 ## Changelog
 
 The version number is also stored in `__version__` at the top of `reader.py`.
+
+### 1.6.0 — 2026-11-13
+- **Added:** Pronunciation editor (Full view → Pronunciations…). Rules can say a word differently, spell it out letter by letter, or skip it, with whole-word, match-case and per-engine options, an on/off box per rule, and "Hear it" buttons to compare before and after. Saved as `pronunciations`.
+- **Added:** Right-click a word or selection in Now Reading to add or edit its pronunciation.
+- **Changed:** Word highlighting timing uses the words actually spoken after pronunciation rules.
+- **Changed:** Text boxes and radio buttons follow the light/dark theme.
 
 ### 1.5.0 — 2026-11-13
 - **Added:** "Surprise me with a random voice" checkbox (Full view options, above Debug). Each read picks a random voice from the engines and voices that are on and ready (no downloads), avoiding an immediate repeat. Saved as `surprise_voice`.

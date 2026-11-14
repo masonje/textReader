@@ -37,17 +37,28 @@ def tokenize(text: str) -> List[Tuple[int, int]]:
     return [(m.start(), m.end()) for m in WORD_RE.finditer(text)]
 
 
-def _word_weights(text: str, spans: Sequence[Tuple[int, int]]) -> Tuple[List[float], List[float]]:
-    """Return (speech weight, pause-after weight) for each word."""
+def _word_weights(
+    text: str, spans: Sequence[Tuple[int, int]], spoken: Optional[Sequence[str]] = None
+) -> Tuple[List[float], List[float]]:
+    """Return (speech weight, pause-after weight) for each word.
+
+    `spoken` optionally gives what is really said for each word (after
+    pronunciation rules), which sets its length; punctuation still comes from `text`.
+    """
     speech, pauses = [], []
     for i, (start, end) in enumerate(spans):
         word = text[start:end]
-        letters = sum(ch.isalnum() for ch in word)
-        weight = max(letters, 1) + WORD_GAP
-        digits = sum(ch.isdigit() for ch in word)
-        if digits:
-            weight += digits * 1.5  # numbers are read out as longer words
-        speech.append(weight)
+        said = spoken[i] if spoken is not None and i < len(spoken) else word
+        letters = sum(ch.isalnum() for ch in said)
+        if spoken is not None and not letters:
+            speech.append(0.2)  # a word that isn't read takes almost no time
+        else:
+            # A replacement can be several words: each adds its own small gap
+            weight = max(letters, 1) + WORD_GAP * max(len(said.split()), 1)
+            digits = sum(ch.isdigit() for ch in said)
+            if digits:
+                weight += digits * 1.5  # numbers are read out as longer words
+            speech.append(weight)
 
         stripped = word.rstrip("\"'”’)]}")
         tail = stripped[-1:] if stripped else ""
@@ -112,12 +123,13 @@ def build_timeline(
     duration: float,
     silences: Optional[Sequence[Tuple[float, Optional[float]]]] = None,
     spans: Optional[Sequence[Tuple[int, int]]] = None,
+    spoken: Optional[Sequence[str]] = None,
 ) -> List[float]:
     """Return the estimated start time (seconds) of every word in `text`."""
     spans = list(spans) if spans is not None else tokenize(text)
     if not spans or duration <= 0:
         return [0.0] * len(spans)
-    speech, pauses = _word_weights(text, spans)
+    speech, pauses = _word_weights(text, spans, spoken)
 
     # Cumulative units: word i starts at starts_u[i]; its pause starts at speech_end_u[i]
     starts_u, speech_end_u = [], []
