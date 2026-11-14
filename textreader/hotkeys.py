@@ -86,3 +86,16 @@ def validate_hotkey_settings(candidate_hotkeys):
             errors.append(f"{HOTKEY_LABELS[action]} duplicates {HOTKEY_LABELS[seen[combo]]}.")
         seen[combo] = action
     return normalized_hotkeys, errors
+
+# What each shortcut's button does, for the hover hint
+HOTKEY_HINTS = {
+    "read_selected_text": "Read the selected text aloud (or the clipboard, if nothing is selected)",
+    "play": "Play, or resume after a pause",
+    "pause": "Pause reading",
+    "stop": "Stop reading",
+}
+
+def hotkey_hint(action, current_hotkeys):
+    """Hover hint for a button: what it does and the shortcut that does the same."""
+    combo = parse_hotkey(current_hotkeys.get(action)) or parse_hotkey(DEFAULT_HOTKEYS[action])
+    return f"{HOTKEY_HINTS[action]}\nShortcut: {format_hotkey(combo)}"
