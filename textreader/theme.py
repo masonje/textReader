@@ -225,3 +225,67 @@ def themed_toplevel(parent, title):
     content = ttk.Frame(dialog, padding=14)
     content.pack(fill=tk.BOTH, expand=True)
     return dialog, content
+
+
+class Tooltip:
+    """A small hint that appears when the mouse rests on a widget.
+
+    `text` is a string or a function returning one, so the hint can change
+    (e.g. after the shortcuts are changed in Options)."""
+
+    DELAY_MS = 500
+
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tip = None
+        self.after_id = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self.hide, add="+")
+        widget.bind("<ButtonPress>", self.hide, add="+")
+        widget.bind("<Destroy>", self.hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self.after_id = self.widget.after(self.DELAY_MS, self.show)
+
+    def _cancel(self):
+        if self.after_id is not None:
+            try:
+                self.widget.after_cancel(self.after_id)
+            except tk.TclError:
+                pass
+            self.after_id = None
+
+    def show(self):
+        self.after_id = None
+        text = self.text() if callable(self.text) else self.text
+        if not text or self.tip is not None or not self.widget.winfo_exists():
+            return
+        tip = tk.Toplevel(self.widget)
+        tip.wm_overrideredirect(True)
+        try:
+            tip.wm_attributes("-type", "tooltip")  # X11: let the window manager treat it as a tooltip
+        except tk.TclError:
+            pass
+        tk.Label(tip, text=text, justify=tk.LEFT, background=PALETTE["surface"], foreground=PALETTE["fg"],
+                 font=_theme_fonts.get("small"), padx=8, pady=4, borderwidth=0,
+                 highlightthickness=1, highlightbackground=PALETTE["border"]).pack()
+        tip.update_idletasks()
+        # Just below the widget, kept on screen
+        x = self.widget.winfo_rootx() + 8
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        x = max(0, min(x, tip.winfo_screenwidth() - tip.winfo_reqwidth() - 4))
+        if y + tip.winfo_reqheight() > tip.winfo_screenheight():
+            y = self.widget.winfo_rooty() - tip.winfo_reqheight() - 4
+        tip.wm_geometry(f"+{x}+{y}")
+        self.tip = tip
+
+    def hide(self, _event=None):
+        self._cancel()
+        if self.tip is not None:
+            try:
+                self.tip.destroy()
+            except tk.TclError:
+                pass
+            self.tip = None

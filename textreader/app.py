@@ -23,9 +23,9 @@ from tkinter import messagebox
 from . import __version__, options, pronunciation, word_timing
 from .engines import get_engine, list_engines
 from .engines.base import SynthesisCancelled, run_cancellable
-from .hotkeys import (DEFAULT_HOTKEYS, HOTKEY_LABELS, HOTKEY_ORDER, normalize_hotkey_part,
+from .hotkeys import (DEFAULT_HOTKEYS, HOTKEY_LABELS, HOTKEY_ORDER, hotkey_hint, normalize_hotkey_part,
                       parse_hotkey, validate_hotkey_settings)
-from .theme import PALETTE, _theme_fonts, apply_theme, themed_toplevel, widen_popdown
+from .theme import PALETTE, Tooltip, _theme_fonts, apply_theme, themed_toplevel, widen_popdown
 
 
 def check_engines():
@@ -1208,6 +1208,13 @@ def create_control_window():
     options_btn.grid(row=3, column=0, padx=(0, 4), pady=(3, 0), sticky="ew")
     mode_btn = ttk.Button(button_frame, text="Full View ▸")
     mode_btn.grid(row=3, column=1, padx=(4, 0), pady=(3, 0), sticky="ew")
+
+    # Hover hints: what each button does and its keyboard shortcut (read when shown,
+    # so they follow changes made in Options → Shortcuts)
+    for button, action in ((read_btn, "read_selected_text"), (play_btn, "play"),
+                           (pause_btn, "pause"), (stop_btn, "stop")):
+        Tooltip(button, lambda action=action: hotkey_hint(action, hotkeys))
+    Tooltip(options_btn, "Engines & voices, pronunciations, and keyboard shortcuts")
 
     # Options area: bottom of the left column, shown only in the full view.
     # Add future settings as more rows in options_form.

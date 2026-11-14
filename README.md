@@ -1,7 +1,7 @@
 # Clipboard Reader
 Reads text aloud. A Python take on TextAloud MP3 that runs on Linux, Windows, or macOS.
 
-**Version:** 1.9.0 — see [Changelog](#changelog) for what changed in each version.
+**Version:** 1.10.0 — see [Changelog](#changelog) for what changed in each version.
 
 ![Clipboard Reader in the Full view, highlighting the word being read](docs/screenshots/full-view.png)
 
@@ -15,6 +15,10 @@ So I made my own. Copilot helped me get it started, and Claude helped me turn it
 **Compact view**: just the controls, small enough to leave on screen. (The **Full view**, shown at the top, adds the text being read with the current word highlighted, plus options.)
 
 ![Compact view: engine, voice, speed and playback controls](docs/screenshots/compact.png)
+
+**Hover hints**: rest the mouse on Read Clipboard, Play, Pause or Stop to see what it does and its keyboard shortcut.
+
+![Hover hint on Read Clipboard showing the Win+Esc shortcut](docs/screenshots/hotkey-hint.png)
 
 **Options** (the **Options…** button) has four tabs:
 
@@ -173,7 +177,7 @@ The main app (`textreader/app.py`) only calls `get_engine()` and `synthesize()` 
 - Adjustable playback speed (0.5x–2x)
 - System tray icon
 - GUI controls
-- Configurable keyboard shortcuts (Options… → Shortcuts)
+- Configurable keyboard shortcuts (Options… → Shortcuts). Hover over Read Clipboard, Play, Pause or Stop to see its shortcut.
 - One **Options…** window with tabs for Engines & Voices, Pronunciations, Links, paths & codes, and Shortcuts
 
 ## Preferences
@@ -253,9 +257,14 @@ In testing with gTTS, sentence starts landed within about 0.1 s of the real audi
 - **Win+Shift+P** — Pause
 - **Win+Shift+S** — Stop
 
+Change them in **Options… → Shortcuts**. Resting the mouse on the Read Clipboard, Play, Pause or Stop button shows its current shortcut.
+
 ## Changelog
 
 The version number is stored in `__version__` in [textreader/__init__.py](textreader/__init__.py).
+
+### 1.10.0 — 2026-11-14
+- **Added:** Hover hints on the Read Clipboard, Play, Pause and Stop buttons show what each does and its keyboard shortcut. They follow changes made in Options → Shortcuts. The Options… button has a hint too.
 
 ### 1.9.0 — 2026-11-14
 - **Changed:** The code is now one Python package, `textreader/`. The 3,000-line `reader.py` is split into `app.py`, `options.py` (the Options window), `theme.py` and `hotkeys.py`, and `tts_engines/` is now `textreader/engines/`. See [Project Layout](#project-layout).
