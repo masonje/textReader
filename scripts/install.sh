@@ -4,25 +4,25 @@
 # the app menu and the taskbar/dock.
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_DIR="$HOME/.local/bin"
 APPS_DIR="$HOME/.local/share/applications"
 ICON_DIR="$HOME/.local/share/icons/hicolor"
-ICON_SOURCE="$SCRIPT_DIR/pireader.png"
+ICON_SOURCE="$ROOT/textreader/assets/pireader.png"
 ICON_SIZES=(16 32 48 128 256 512)
 
 echo "Building reader executable..."
-"$SCRIPT_DIR/build.sh"
+"$ROOT/scripts/build.sh"
 
 echo "Installing executable to $BIN_DIR..."
 mkdir -p "$BIN_DIR"
 # Temp copy + rename so this works even while the app is running
-cp "$SCRIPT_DIR/dist/reader" "$BIN_DIR/.reader.new"
+cp "$ROOT/dist/reader" "$BIN_DIR/.reader.new"
 chmod +x "$BIN_DIR/.reader.new"
 mv -f "$BIN_DIR/.reader.new" "$BIN_DIR/reader"
 
 echo "Generating icon set from $ICON_SOURCE..."
-PYTHON="$SCRIPT_DIR/.venv/bin/python"
+PYTHON="$ROOT/.venv/bin/python"
 if [ ! -x "$PYTHON" ]; then
 	PYTHON="python3"
 fi

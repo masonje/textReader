@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "textreader"
+description = "Clipboard Reader: reads selected text aloud, with a choice of speech engines"
+readme = "README.md"
+requires-python = ">=3.10"
+dynamic = ["version"]
+dependencies = [
+    "pyperclip==1.11.0",
+    "gTTS==2.5.4",
+    "pygame==2.6.1",
+    "pystray==0.19.5",
+    "Pillow==12.1.0",
+    "pynput==1.8.1",
+    "pyttsx3==2.99",
+    "numpy",
+    "piper-tts==1.8.0",
+    "edge-tts==7.3.1",
+]
+
+[project.optional-dependencies]
+# Coqui TTS is large (installs PyTorch, several GB) and slow on CPU.
+coqui = ["coqui-tts"]
+dev = ["pytest", "pyflakes", "pyinstaller"]
+
+[project.gui-scripts]
+textreader = "textreader.__main__:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "textreader.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["textreader*"]
+
+[tool.setuptools.package-data]
+textreader = ["assets/*.png"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

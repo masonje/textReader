@@ -1,7 +1,7 @@
 # Clipboard Reader
 Reads text aloud. A Python take on TextAloud MP3 that runs on Linux, Windows, or macOS.
 
-**Version:** 1.8.1 — see [Changelog](#changelog) for what changed in each version.
+**Version:** 1.9.0 — see [Changelog](#changelog) for what changed in each version.
 
 ![Clipboard Reader in the Full view, highlighting the word being read](docs/screenshots/full-view.png)
 
@@ -32,18 +32,10 @@ So I made my own. Copilot helped me get it started, and Claude helped me turn it
 
 ## Requirements
 
-- Python 3.7+
-- The following Python packages (install with `pip install -r requirements.txt`):
-	- pyperclip
-	- gtts (for gTTS engine)
-	- pyttsx3 (for pyttsx3 engine)
-	- piper-tts (for Piper engine)
-	- edge-tts (for Edge TTS engine)
-	- pygame
-	- pystray
-	- Pillow
-	- pynput
-	- coqui-tts (optional, for Coqui TTS; not in requirements.txt because it needs PyTorch. The app can install it for you, see below.)
+- Linux (also runs on macOS and Windows, but is mainly used and tested on Linux)
+- Python 3.10+
+- Python packages, listed in [pyproject.toml](pyproject.toml): pyperclip, gTTS, pyttsx3, piper-tts, edge-tts, pygame, pystray, Pillow, pynput, numpy. `scripts/setup.sh` installs them.
+	- coqui-tts is optional (for Coqui TTS). It isn't installed by default because it needs PyTorch; the app can install it for you, see below.
 
 - ffmpeg (for audio speed control)
 - espeak-ng (for eSpeak-NG engine)
@@ -63,18 +55,54 @@ So I made my own. Copilot helped me get it started, and Claude helped me turn it
 - Download from [ffmpeg.org](https://ffmpeg.org/download.html)
 - Add the ffmpeg `bin` directory to your PATH environment variable
 
-## Usage
-Run the script:
+## Setup and Usage
+
+On Ubuntu/Debian, `scripts/setup.sh` installs the system packages (ffmpeg, espeak-ng, festival, Tk, …), creates the `.venv` virtual environment, installs the app and its Python packages into it, and adds a desktop launcher:
 
 ```bash
-python reader.py
+scripts/setup.sh
 ```
 
-## TTS Engines (tts_engines)
+Then run the app from source:
 
-Each TTS engine lives in the tts_engines directory and implements a common interface.
+```bash
+.venv/bin/textreader
+```
 
-- tts_engines/base.py
+(`.venv/bin/python -m textreader` does the same.) The app is installed in "editable" mode, so it runs the code in this folder: edit, restart, and your change is live.
+
+## Project Layout
+
+```
+textreader/             the app, as one Python package
+  __main__.py           entry point: --version, dependency check, --check-engines, start
+  app.py                main window, playback, hotkeys, tray icon, settings
+  options.py            the Options window and its tabs
+  theme.py              light/dark palette and widget styles
+  hotkeys.py            parsing and checking shortcut strings
+  pronunciation.py      word rules and the links/paths/codes filters
+  word_timing.py        word-highlight timing
+  engines/              one file per speech engine (see below)
+  assets/pireader.png   app icon
+scripts/                setup.sh, build.sh, install.sh
+tests/                  pytest tests
+docs/screenshots/       README pictures
+pyproject.toml          package info, dependencies, test settings
+```
+
+## Tests
+
+```bash
+.venv/bin/python -m pytest
+```
+
+The tests cover the parts that can be checked without sound or a window: the pronunciation rules, the links/paths/codes filters, word-highlight timing and shortcut parsing. They run in under a second. Check the engines themselves with `reader --check-engines`.
+
+## TTS Engines (textreader/engines)
+
+Each TTS engine lives in the `textreader/engines` directory and implements a common interface.
+
+- textreader/engines/base.py
 	- Defines the `TTSEngine` base class
 	- Required fields: `name`, `output_ext`
 	- Required methods: `check_dependencies()`, `synthesize(text, output_path, cancel_event=None, voice=None)`
@@ -82,7 +110,7 @@ Each TTS engine lives in the tts_engines directory and implements a common inter
 	- `run_cancellable(cmd, cancel_event, input_text=None)`: helper that runs an external command and kills it if the build is cancelled
 	- `SynthesisCancelled`: exception an engine raises when it stops because of a cancel
 
-- tts_engines/__init__.py
+- textreader/engines/__init__.py
 	- Auto-discovers engine modules named `engine_*.py`
 	- Registers all `TTSEngine` subclasses
 	- Exposes `list_engines()` and `get_engine(name)`
@@ -104,20 +132,20 @@ These are saved in settings.json as `disabled_engines`, `disabled_voices`, `voic
 
 | Engine | Voices | Quality | Needs |
 |---|---|---|---|
-| [Piper](tts_engines/engine_piper.py) | 15 English voices (US, UK, Scottish; male and female) | Natural neural voices, offline | Each voice is ~63 MB, downloaded the first time it's used (or from Options… → Engines & Voices) to `~/.textReader/voices/piper`; downloaded voices can be deleted there |
-| [Edge TTS](tts_engines/engine_edge.py) | ~47 English voices from Microsoft (US, UK, Australia, Canada, India, Ireland, and more) | Very natural neural voices | Internet connection |
-| [gTTS](tts_engines/engine_gtts.py) | 8 English accents (US, UK, Australia, Canada, India, Ireland, South Africa, Nigeria) | Good | Internet connection |
-| [pyttsx3](tts_engines/engine_pyttsx3.py) | The system's speech voices (eSpeak on Linux, SAPI on Windows, NSSpeech on macOS) | Robotic on Linux | — |
-| [eSpeak-NG](tts_engines/engine_espeak.py) | English accents, plus female variants of US and UK English | Robotic | `espeak-ng` |
-| [Festival](tts_engines/engine_festival.py) | Installed Festival voices (e.g. `festvox-kallpc16k`) | Robotic | `festival` |
-| [Coqui TTS](tts_engines/engine_coqui.py) | One voice (Tacotron2) | Neural, slow on CPU | Installed on request, about 1 GB (see below) |
+| [Piper](textreader/engines/engine_piper.py) | 15 English voices (US, UK, Scottish; male and female) | Natural neural voices, offline | Each voice is ~63 MB, downloaded the first time it's used (or from Options… → Engines & Voices) to `~/.textReader/voices/piper`; downloaded voices can be deleted there |
+| [Edge TTS](textreader/engines/engine_edge.py) | ~47 English voices from Microsoft (US, UK, Australia, Canada, India, Ireland, and more) | Very natural neural voices | Internet connection |
+| [gTTS](textreader/engines/engine_gtts.py) | 8 English accents (US, UK, Australia, Canada, India, Ireland, South Africa, Nigeria) | Good | Internet connection |
+| [pyttsx3](textreader/engines/engine_pyttsx3.py) | The system's speech voices (eSpeak on Linux, SAPI on Windows, NSSpeech on macOS) | Robotic on Linux | — |
+| [eSpeak-NG](textreader/engines/engine_espeak.py) | English accents, plus female variants of US and UK English | Robotic | `espeak-ng` |
+| [Festival](textreader/engines/engine_festival.py) | Installed Festival voices (e.g. `festvox-kallpc16k`) | Robotic | `festival` |
+| [Coqui TTS](textreader/engines/engine_coqui.py) | One voice (Tacotron2) | Neural, slow on CPU | Installed on request, about 1 GB (see below) |
 
 **Installing Coqui TTS:** pick Coqui TTS as the engine and the app offers to install it. It creates a private Python environment in `~/.textReader/engines/coqui` and installs CPU-only PyTorch and Coqui there (about 1 GB, several minutes). It shows the progress, and you can cancel. Coqui then runs in a background worker process that keeps the model loaded between reads. To remove it, delete `~/.textReader/engines`. If you run from source and have `coqui-tts` installed in the app's own environment, that is used instead.
 
-Run `reader --check-engines` (or `python reader.py --check-engines`) to see which engines work and try each one.
+Run `reader --check-engines` (or `.venv/bin/textreader --check-engines` from source) to see which engines work and try each one.
 
 ### Adding a new engine
-1. Create a new engine file in tts_engines with the `engine_*.py` prefix (e.g., engine_mytts.py).
+1. Create a new engine file in `textreader/engines` with the `engine_*.py` prefix (e.g., engine_mytts.py).
 2. Implement a subclass of `TTSEngine` with:
 	- `name`: what shows up in the UI dropdown
 	- `output_ext`: `mp3` or `wav`
@@ -126,27 +154,13 @@ Run `reader --check-engines` (or `python reader.py --check-engines`) to see whic
 	- `synthesize(text, output_path, cancel_event=None, voice=None)`: write audio to output_path. Check `cancel_event.is_set()` where you can and raise `SynthesisCancelled`; for external commands use `run_cancellable()`. Engines that can't be interrupted can ignore it, and the app throws away their output.
 3. No manual registration required. The module is auto-discovered on startup.
 
-The main app (reader.py) only calls `get_engine()` and `synthesize()` and does not contain per-engine logic.
+The main app (`textreader/app.py`) only calls `get_engine()` and `synthesize()` and does not contain per-engine logic.
 
 ## Build and Install (Linux)
 
-`./install.sh` builds a single-file executable with PyInstaller (via `build.sh`), copies it to `~/.local/bin/reader`, installs the icon set, and adds a "Screen Reader" launcher to the app menu.
+`scripts/install.sh` builds a single-file executable with PyInstaller (via `scripts/build.sh`), copies it to `~/.local/bin/reader`, installs the icon set, and adds a "Screen Reader" launcher to the app menu.
 
-## Creating a Standalone Executable (PyInstaller)
-
-1. Install PyInstaller:
-	```bash
-	pip install pyinstaller
-	```
-
-2. Build the executable:
-	```bash
-	pyinstaller --onefile --windowed reader.py
-	```
-	- `--onefile` creates a single executable file
-	- `--windowed` prevents a terminal window from opening (for GUI apps)
-
-3. Find your executable in the `dist` folder.
+`scripts/build.sh` on its own builds `dist/reader` and copies it to `~/.local/bin/reader`. The PyInstaller options (bundled engines and icon, hidden imports) are in that script; its spec file goes in `build/`.
 
 4. Copy the executable to your target system. Make sure ffmpeg is installed (see above).
 
@@ -202,7 +216,7 @@ Open the **Pronunciations** tab of **Options…**, or right-click a word (or a s
 
 Options per rule: **Whole word only** (on by default, so "cat" doesn't change "concatenate"; symbols such as `&` or `[1]` still match next to a word), **Match upper/lower case exactly**, and **Use with** all engines or just one. Click a rule's box to turn it on or off. **Hear it: As written / With this rule** plays the word with your current voice so you can compare before saving.
 
-Rules apply to every read (including Surprise me). Now Reading still shows your original text, and word highlighting is timed to what is actually said. With Debug mode on, the terminal shows the text sent to the voice. Rules are applied in one pass, longest first, and are saved as `pronunciations` in settings.json; the logic lives in [pronunciation.py](pronunciation.py).
+Rules apply to every read (including Surprise me). Now Reading still shows your original text, and word highlighting is timed to what is actually said. With Debug mode on, the terminal shows the text sent to the voice. Rules are applied in one pass, longest first, and are saved as `pronunciations` in settings.json; the logic lives in [pronunciation.py](textreader/pronunciation.py).
 
 ### Links, paths and codes
 The **Links, paths & codes** tab of **Options…** chooses how long, hard-to-listen-to text is read. Each row shows an example, what it will sound like, and a **▶ Hear** button. The **Try it** box shows how any text you paste will be read (word rules included) and can play it.
@@ -222,7 +236,7 @@ What counts:
 Links, paths and codes are handled before word rules. The choices are saved as `text_filters` in settings.json.
 
 ## Word Highlighting (Full view)
-None of the TTS engines report when each word is spoken, so [word_timing.py](word_timing.py) estimates it:
+None of the TTS engines report when each word is spoken, so [word_timing.py](textreader/word_timing.py) estimates it:
 1. Each word is weighted by length, with extra time after punctuation where voices pause.
 2. ffmpeg's `silencedetect` finds where speech starts and ends and the pauses in between.
 3. Pauses are matched to the punctuation they belong to, which keeps long text from drifting.
@@ -231,7 +245,7 @@ In testing with gTTS, sentence starts landed within about 0.1 s of the real audi
 
 ## Checking the Version
 - The Compact view shows the version at the bottom of the window.
-- From a terminal: `reader --version` (or `python reader.py --version`).
+- From a terminal: `reader --version` (or `.venv/bin/textreader --version` from source).
 
 ## Keyboard Shortcuts
 - **Win+Escape** — Read selected text
@@ -241,7 +255,14 @@ In testing with gTTS, sentence starts landed within about 0.1 s of the real audi
 
 ## Changelog
 
-The version number is also stored in `__version__` at the top of `reader.py`.
+The version number is stored in `__version__` in [textreader/__init__.py](textreader/__init__.py).
+
+### 1.9.0 — 2026-11-14
+- **Changed:** The code is now one Python package, `textreader/`. The 3,000-line `reader.py` is split into `app.py`, `options.py` (the Options window), `theme.py` and `hotkeys.py`, and `tts_engines/` is now `textreader/engines/`. See [Project Layout](#project-layout).
+- **Changed:** `setup.sh`, `build.sh` and `install.sh` moved to `scripts/`. Dependencies moved from `requirements.txt` to `pyproject.toml`, and `scripts/setup.sh` installs the app into `.venv`.
+- **Changed:** Run from source with `.venv/bin/textreader` (or `python -m textreader`). `run.sh` is gone.
+- **Added:** `tests/` with pytest tests for the pronunciation rules, the links/paths/codes filters, word timing and shortcuts. Run them with `.venv/bin/python -m pytest`.
+- **Fixed:** When a voice Preview failed, showing the error crashed, so the reason never appeared.
 
 ### 1.8.1 — 2026-11-14
 - **Changed:** Version bump after the 1.8.0 Options window release was merged; no feature changes.

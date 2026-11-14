@@ -5,7 +5,7 @@
             "name": "Python: Clipboard Reader",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/reader.py",
+            "module": "textreader",
             "console": "integratedTerminal",
             "justMyCode": true,
             "python": "${workspaceFolder}/.venv/bin/python",

@@ -4,6 +4,10 @@
 
 set -e  # Exit on error
 
+# Work from the repository root, wherever this is run from
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
 echo "🔨 Building textReader executable..."
 
 # Activate virtual environment
@@ -11,7 +15,7 @@ if [ -d ".venv" ]; then
     echo "📦 Activating virtual environment..."
     source .venv/bin/activate
 else
-    echo "❌ Virtual environment not found. Run: python -m venv .venv"
+    echo "❌ Virtual environment not found. Run: scripts/setup.sh"
     exit 1
 fi
 
@@ -21,23 +25,27 @@ pip install -q pyinstaller
 
 # Clean previous builds
 echo "🧹 Cleaning previous builds..."
-rm -rf build dist *.spec
+rm -rf build dist
 
 # Build with PyInstaller
 echo "🚀 Running PyInstaller..."
 pyinstaller \
+    --name reader \
     --onefile \
     --windowed \
-    --icon "pireader.png" \
-    --add-data "tts_engines:tts_engines" \
-    --add-data "pireader.png:." \
+    --specpath build \
+    --paths "$ROOT" \
+    --icon "$ROOT/textreader/assets/pireader.png" \
+    --add-data "$ROOT/textreader/assets:textreader/assets" \
+    --add-data "$ROOT/textreader/engines:textreader/engines" \
+    --collect-submodules textreader \
     --hidden-import=gtts \
     --hidden-import=pyttsx3 \
     --collect-submodules pyttsx3 \
     --hidden-import=edge_tts \
     --collect-all piper \
     --hidden-import=onnxruntime \
-    reader.py
+    textreader/__main__.py
 
 echo "✅ Build complete!"
 echo "📁 Executable location: dist/reader"
