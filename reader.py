@@ -1,5 +1,5 @@
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 # Dependency check
 import sys
@@ -1554,11 +1554,13 @@ def create_control_window():
         save_settings()
         return True
 
-    def open_shortcut_preferences():
-        dialog, body = themed_toplevel(window, "Shortcut Preferences")
-        dialog.transient(window)
-        dialog.grab_set()
+    shortcut_hooks = {"save": None}  # the Shortcuts tab's Save button, while the Options window is open
+    controls_busy = {"on": False}    # True while a read is building (Save is turned off then)
 
+    def build_shortcut_preferences(body):
+        """The Shortcuts tab: pick the key combination for each action."""
+        ttk.Label(body, text="Choose the key combination for each action. Changes take effect when you click Save.",
+                  wraplength=780).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 12))
         modifier_options = [
             "Win",
             "Win+Shift",
@@ -1572,11 +1574,11 @@ def create_control_window():
         key_options = ["Esc", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "Space", "Enter", "Tab"]
         shortcut_vars = {}
 
-        ttk.Label(body, text="Action", style="Header.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 10), pady=(0, 6))
-        ttk.Label(body, text="Modifier", style="Header.TLabel").grid(row=0, column=1, sticky="w", padx=4, pady=(0, 6))
-        ttk.Label(body, text="Key", style="Header.TLabel").grid(row=0, column=2, sticky="w", padx=4, pady=(0, 6))
+        ttk.Label(body, text="Action", style="Header.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=(0, 6))
+        ttk.Label(body, text="Modifier", style="Header.TLabel").grid(row=1, column=1, sticky="w", padx=4, pady=(0, 6))
+        ttk.Label(body, text="Key", style="Header.TLabel").grid(row=1, column=2, sticky="w", padx=4, pady=(0, 6))
 
-        for row_index, action in enumerate(HOTKEY_ORDER, start=1):
+        for row_index, action in enumerate(HOTKEY_ORDER, start=2):
             modifier, key = hotkey_dropdown_values(hotkeys.get(action, DEFAULT_HOTKEYS[action]))
             modifier_var = tk.StringVar(value=modifier)
             key_var = tk.StringVar(value=key)
@@ -1591,25 +1593,37 @@ def create_control_window():
                 for action, (modifier_var, key_var) in shortcut_vars.items()
             }
 
-        def on_dialog_save():
-            if apply_hotkey_preferences(selected_hotkeys()):
-                dialog.destroy()
+        def show_saved(text):
+            status.config(text=text)
 
-        def on_dialog_reset():
+        def on_tab_save():
+            if apply_hotkey_preferences(selected_hotkeys()):
+                show_saved("Shortcuts saved.")
+
+        def on_tab_reset():
             for action, (modifier_var, key_var) in shortcut_vars.items():
                 modifier, key = hotkey_dropdown_values(DEFAULT_HOTKEYS[action])
                 modifier_var.set(modifier)
                 key_var.set(key)
+            show_saved("Defaults filled in. Click Save to use them.")
+
+        for modifier_var, key_var in shortcut_vars.values():
+            for var in (modifier_var, key_var):
+                var.trace_add("write", lambda *_: show_saved(""))
 
         button_row = ttk.Frame(body)
-        button_row.grid(row=len(HOTKEY_ORDER) + 1, column=0, columnspan=3, sticky="ew", pady=(14, 0))
-        ttk.Button(button_row, text="Reset", command=on_dialog_reset, width=8).pack(side=tk.LEFT)
-        ttk.Button(button_row, text="Save", command=on_dialog_save, width=8, style="Accent.TButton").pack(side=tk.RIGHT)
-        ttk.Button(button_row, text="Cancel", command=dialog.destroy, width=8).pack(side=tk.RIGHT, padx=(0, 6))
-        dialog.bind("<Escape>", lambda _e: dialog.destroy())
+        button_row.grid(row=len(HOTKEY_ORDER) + 2, column=0, columnspan=3, sticky="ew", pady=(14, 0))
+        ttk.Button(button_row, text="Reset to defaults", command=on_tab_reset).pack(side=tk.LEFT)
+        save_btn = ttk.Button(button_row, text="Save", command=on_tab_save, width=8, style="Accent.TButton")
+        save_btn.pack(side=tk.RIGHT)
+        status = ttk.Label(body, text="", style="Muted.TLabel")
+        status.grid(row=len(HOTKEY_ORDER) + 3, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        if controls_busy["on"]:
+            save_btn.state(["disabled"])  # don't swap shortcuts in the middle of a read
+        shortcut_hooks["save"] = save_btn
 
-    shortcuts_btn = ttk.Button(button_frame, text="Shortcuts…", command=open_shortcut_preferences)
-    shortcuts_btn.grid(row=3, column=0, padx=(0, 4), pady=(3, 0), sticky="ew")
+    options_btn = ttk.Button(button_frame, text="Options…", command=lambda: open_options())
+    options_btn.grid(row=3, column=0, padx=(0, 4), pady=(3, 0), sticky="ew")
     mode_btn = ttk.Button(button_frame, text="Full View ▸")
     mode_btn.grid(row=3, column=1, padx=(4, 0), pady=(3, 0), sticky="ew")
 
@@ -1634,10 +1648,6 @@ def create_control_window():
         save_settings()
     ttk.Checkbutton(options_form, text="Debug mode", variable=debug_var,
                     command=on_debug_toggle).grid(row=1, column=0, columnspan=2, sticky="w", pady=3)
-    manage_btn = ttk.Button(options_form, text="Engines & Voices…", command=lambda: open_engine_manager())
-    manage_btn.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 3))
-    ttk.Button(options_form, text="Pronunciations…", command=lambda: open_pronunciation_editor()) \
-        .grid(row=3, column=0, columnspan=2, sticky="ew", pady=3)
 
     def refresh_engine_choices():
         """Re-apply enable/disable settings to the Engine and Voice lists."""
@@ -1661,12 +1671,9 @@ def create_control_window():
         if manager_hooks["refresh"] is not None:
             manager_hooks["refresh"](engine_name)  # the manager's list and details
 
-    def open_engine_manager():
-        """Turn engines and voices on or off, and see details, speed and ratings for each."""
-        dialog, body = themed_toplevel(window, "Engines & Voices")
-        dialog.transient(window)
-        dialog.resizable(True, True)
-        dialog.minsize(950, 520)
+    def build_engine_manager(dialog, body):
+        """The Engines & Voices tab: turn engines and voices on or off, and see details,
+        speed and ratings for each."""
         ttk.Label(body, text="Click a row's box to turn it on or off; turned-off engines and voices are hidden "
                              "from the drop-downs. Select a row to see its details.", wraplength=780).pack(anchor="w")
 
@@ -2171,30 +2178,16 @@ def create_control_window():
 
         ttk.Button(buttons, text="All voices on", command=lambda: set_all_voices(True)).pack(side=tk.LEFT)
         ttk.Button(buttons, text="All voices off", command=lambda: set_all_voices(False)).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(buttons, text="Close", style="Accent.TButton", command=dialog.destroy, width=8).pack(side=tk.RIGHT)
-        dialog.bind("<Escape>", lambda _e: dialog.destroy())
 
         # Start with the current engine selected
         tree.selection_set(engine_items.get(tts_engine, engine_items[all_names[0]]))
 
     pron_editor = {"open": None}  # the open editor's "load a word" function, if any
 
-    def open_pronunciation_editor(word=None):
-        """Add, change and test rules for how words, names and symbols are read aloud."""
+    def build_pronunciation_editor(dialog, notebook, words_tab, filters_tab):
+        """The Pronunciations and Links, paths & codes tabs: add, change and test rules for
+        how words, names and symbols are read aloud."""
         global pronunciations
-        if pron_editor["open"] is not None:
-            pron_editor["open"](word)  # already open: bring it forward with this word
-            return
-        dialog, body = themed_toplevel(window, "Pronunciations")
-        dialog.transient(window)
-        dialog.resizable(True, True)
-        dialog.minsize(860, 0)
-        notebook = ttk.Notebook(body)
-        notebook.pack(fill=tk.BOTH, expand=True)
-        words_tab = ttk.Frame(notebook, padding=(12, 12, 12, 10))
-        filters_tab = ttk.Frame(notebook, padding=(12, 12, 12, 10))
-        notebook.add(words_tab, text="Words & names")
-        notebook.add(filters_tab, text="Links, paths & codes")
         ttk.Label(words_tab, text="Change how words, names, abbreviations and symbols are read aloud. "
                                   "Click a rule's box to turn it on or off. Tip: right-click a word in "
                                   "Now Reading to add it here.", wraplength=780).pack(anchor="w")
@@ -2338,11 +2331,6 @@ def create_control_window():
             spoken = try_spoken().strip()
             try_result.config(text=f"Read as: {spoken}" if spoken else "Read as: (nothing)")
         try_var.trace_add("write", update_try)
-
-        buttons = ttk.Frame(body)
-        buttons.pack(fill=tk.X, pady=(10, 0))
-        ttk.Button(buttons, text="Close", style="Accent.TButton", width=8,
-                   command=lambda: close()).pack(side=tk.RIGHT)
 
         state = {"editing": None, "playing": False}  # index of the rule in the form (None: new)
         items = {}  # tree item -> rule index
@@ -2543,21 +2531,57 @@ def create_control_window():
             threading.Thread(target=play_sample, args=(name, engine_voices.get(name), sample, report),
                              daemon=True).start()
 
-        def close():
-            pron_editor["open"] = None
-            dialog.destroy()
-
-        dialog.protocol("WM_DELETE_WINDOW", close)
-        dialog.bind("<Escape>", lambda _e: close())
         text_entry.bind("<Return>", lambda _e: save_rule())
         say_entry.bind("<Return>", lambda _e: save_rule())
         pron_editor["open"] = open_word
         redraw()
         update_try()
+        new_rule()
+
+    options_window = {"dialog": None, "notebook": None, "tabs": {}}
+
+    def open_options(tab=None, word=None):
+        """The Options window: engines and voices, pronunciations, links/paths/codes and shortcuts,
+        one tab each. `tab` picks a tab; `word` opens the Pronunciations tab on that word."""
+        dialog = options_window["dialog"]
+        if dialog is None or not dialog.winfo_exists():
+            dialog, body = themed_toplevel(window, "Options")
+            dialog.transient(window)
+            dialog.resizable(True, True)
+            dialog.minsize(980, 600)
+            notebook = ttk.Notebook(body)
+            notebook.pack(fill=tk.BOTH, expand=True)
+            tabs = {}
+            for key, title in (("engines", "Engines & Voices"), ("words", "Pronunciations"),
+                               ("filters", "Links, paths & codes"), ("shortcuts", "Shortcuts")):
+                tabs[key] = ttk.Frame(notebook, padding=(12, 12, 12, 10))
+                notebook.add(tabs[key], text=title)
+            options_window.update(dialog=dialog, notebook=notebook, tabs=tabs)
+
+            def close():
+                pron_editor["open"] = None
+                shortcut_hooks["save"] = None
+                options_window["dialog"] = None
+                dialog.destroy()
+
+            buttons = ttk.Frame(body)
+            buttons.pack(fill=tk.X, pady=(10, 0))
+            ttk.Button(buttons, text="Close", style="Accent.TButton", width=8, command=close).pack(side=tk.RIGHT)
+            dialog.protocol("WM_DELETE_WINDOW", close)
+            dialog.bind("<Escape>", lambda _e: close())
+
+            build_engine_manager(dialog, tabs["engines"])
+            build_pronunciation_editor(dialog, notebook, tabs["words"], tabs["filters"])
+            build_shortcut_preferences(tabs["shortcuts"])
+        tabs = options_window["tabs"]
         if word:
-            open_word(word)
+            pron_editor["open"](word)  # selects the Pronunciations tab and shows the word
         else:
-            new_rule()
+            if tab in tabs:
+                options_window["notebook"].select(tabs[tab])
+            dialog.deiconify()
+            dialog.lift()
+            dialog.focus_force()
 
     version_label = ttk.Label(content, text=f"Version {__version__}", style="Muted.TLabel")
     version_label.pack(pady=(12, 0))
@@ -2609,8 +2633,8 @@ def create_control_window():
                        borderwidth=1, relief=tk.SOLID)
         existing = any(str(r["text"]).lower() == word.lower() for r in pronunciations)
         menu.add_command(label=f"{'Edit' if existing else 'Change'} how “{word}” is read…",
-                         command=lambda: open_pronunciation_editor(word))
-        menu.add_command(label="Pronunciations…", command=open_pronunciation_editor)
+                         command=lambda: open_options(word=word))
+        menu.add_command(label="Pronunciations…", command=lambda: open_options("words"))
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -2733,7 +2757,9 @@ def create_control_window():
         stop_btn.state([ttk_state])
         read_btn.state([ttk_state])
         speed_slider.state([ttk_state])
-        shortcuts_btn.state([ttk_state])
+        controls_busy["on"] = disabled
+        if shortcut_hooks["save"] is not None and shortcut_hooks["save"].winfo_exists():
+            shortcut_hooks["save"].state([ttk_state])
     window.set_buttons_state = set_controls_state
 
     current_missing = check_engine_dependencies(tts_engine)

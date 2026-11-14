@@ -1,7 +1,7 @@
 # Clipboard Reader
 Reads text aloud. A Python take on TextAloud MP3 that runs on Linux, Windows, or macOS.
 
-**Version:** 1.7.0 — see [Changelog](#changelog) for what changed in each version.
+**Version:** 1.8.0 — see [Changelog](#changelog) for what changed in each version.
 
 ![Clipboard Reader in the Full view, highlighting the word being read](docs/screenshots/full-view.png)
 
@@ -16,17 +16,19 @@ So I made my own. Copilot helped me get it started, and Claude helped me turn it
 
 ![Compact view: engine, voice, speed and playback controls](docs/screenshots/compact.png)
 
+**Options** (the **Options…** button) has four tabs:
+
 **Engines & Voices**: turn engines and voices on or off, preview them, download or delete voices, and see where audio is generated, speed and quality.
 
-![Engines & Voices window with a Piper voice selected](docs/screenshots/engines-voices.png)
+![Options window, Engines & Voices tab, with Piper selected](docs/screenshots/engines-voices.png)
 
 **Pronunciations**: change how words, names, abbreviations and symbols are read.
 
-![Pronunciations editor with a rule that reads Nguyen as "win"](docs/screenshots/pronunciations.png)
+![Options window, Pronunciations tab, with a rule that reads Nguyen as "win"](docs/screenshots/pronunciations.png)
 
 **Links, paths & codes**: read long web links, email addresses, file paths and codes in a short form instead of spelling them out.
 
-![Links, paths & codes tab with a Try it box](docs/screenshots/links-paths-codes.png)
+![Options window, Links, paths & codes tab, with a Try it box](docs/screenshots/links-paths-codes.png)
 
 ## Requirements
 
@@ -89,7 +91,7 @@ Each TTS engine lives in the tts_engines directory and implements a common inter
 
 Pick the engine and voice in the control window. Each engine remembers its own voice choice.
 
-In the Full view, **Engines & Voices…** (bottom left) opens a list of every engine and voice showing where its speech is **Generated**, its **Speed**, and its **Quality**:
+The **Engines & Voices** tab of **Options…** shows a list of every engine and voice showing where its speech is **Generated**, its **Speed**, and its **Quality**:
 - **Generated:** "Locally" means the speech is made on your computer and nothing you read leaves it (Piper, Coqui, eSpeak-NG, Festival, pyttsx3). "Online (Google)" for gTTS and "Online (Microsoft)" for Edge TTS mean the text you read is sent to that company's servers, which return the audio. Piper downloads each voice once but then runs offline.
 - **Details:** select an engine or voice to see its details: gender, accent, whether it needs the internet, download size, audio format, the model or service behind it, and for Edge voices Microsoft's personality and "good for" tags.
 - **Speed** is measured, not guessed. Every read (and every Preview) records how long the voice took to build compared with how long the speech is. "About 8 s to build 1 minute of speech" means fast. Builds that include a one-time download or model load are skipped.
@@ -102,7 +104,7 @@ These are saved in settings.json as `disabled_engines`, `disabled_voices`, `voic
 
 | Engine | Voices | Quality | Needs |
 |---|---|---|---|
-| [Piper](tts_engines/engine_piper.py) | 15 English voices (US, UK, Scottish; male and female) | Natural neural voices, offline | Each voice is ~63 MB, downloaded the first time it's used (or from Engines & Voices) to `~/.textReader/voices/piper`; downloaded voices can be deleted there |
+| [Piper](tts_engines/engine_piper.py) | 15 English voices (US, UK, Scottish; male and female) | Natural neural voices, offline | Each voice is ~63 MB, downloaded the first time it's used (or from Options… → Engines & Voices) to `~/.textReader/voices/piper`; downloaded voices can be deleted there |
 | [Edge TTS](tts_engines/engine_edge.py) | ~47 English voices from Microsoft (US, UK, Australia, Canada, India, Ireland, and more) | Very natural neural voices | Internet connection |
 | [gTTS](tts_engines/engine_gtts.py) | 8 English accents (US, UK, Australia, Canada, India, Ireland, South Africa, Nigeria) | Good | Internet connection |
 | [pyttsx3](tts_engines/engine_pyttsx3.py) | The system's speech voices (eSpeak on Linux, SAPI on Windows, NSSpeech on macOS) | Robotic on Linux | — |
@@ -149,7 +151,7 @@ The main app (reader.py) only calls `get_engine()` and `synthesize()` and does n
 4. Copy the executable to your target system. Make sure ffmpeg is installed (see above).
 
 ## Features
-- **Pronunciations:** change how words, names, abbreviations and symbols are read aloud (Full view → Pronunciations…, or right-click a word in Now Reading). See [Pronunciations](#pronunciations).
+- **Pronunciations:** change how words, names, abbreviations and symbols are read aloud (Options… → Pronunciations, or right-click a word in Now Reading). See [Pronunciations](#pronunciations).
 - **Links, paths & codes:** long web links, email addresses, file paths and codes (hashes, keys, account numbers) are read in a short form you choose, like "github.com path 6" or "40 character code six five seven zero". See [Links, paths and codes](#links-paths-and-codes).
 - **Surprise me:** tick "Surprise me with a random voice" (Full view, bottom left) and each read uses a random voice from the engines and voices you have turned on. Voices that would need a download first are skipped, and the same voice isn't picked twice in a row. The Now Reading header shows which voice was used. If the picked voice fails (for example, an online service doesn't answer), another engine is tried automatically.
 - Two views: **Compact** (just the controls, small enough to leave on screen) and **Full** (adds a panel showing the text being read, with the current word highlighted). Switch with the Full View ▸ / ◂ Compact button.
@@ -157,10 +159,11 @@ The main app (reader.py) only calls `get_engine()` and `synthesize()` and does n
 - Adjustable playback speed (0.5x–2x)
 - System tray icon
 - GUI controls
-- Configurable keyboard shortcuts
+- Configurable keyboard shortcuts (Options… → Shortcuts)
+- One **Options…** window with tabs for Engines & Voices, Pronunciations, Links, paths & codes, and Shortcuts
 
 ## Preferences
-Settings are saved in `~/.textReader/settings.json`. The control window includes a Shortcuts button that opens a shortcut preferences dialog with dropdowns for modifier and key choices. The same values can also be edited directly in JSON:
+Settings are saved in `~/.textReader/settings.json`. The **Shortcuts** tab of the **Options…** window has drop-downs for the modifier and key of each action; click **Save** to use them. The same values can also be edited directly in JSON:
 
 ```json
 {
@@ -189,7 +192,7 @@ Settings are saved in `~/.textReader/settings.json`. The control window includes
 `view_mode` is `"compact"` or `"full"`, and `full_window_size` remembers the Full view's size (for example `"840x460"`). Both are saved automatically.
 
 ## Pronunciations
-Open **Pronunciations…** in the Full view (bottom left), or right-click a word (or a selection) in Now Reading and choose **Change how "word" is read…**. Each rule matches a word, name, letters or symbol and does one of:
+Open the **Pronunciations** tab of **Options…**, or right-click a word (or a selection) in Now Reading and choose **Change how "word" is read…**. Each rule matches a word, name, letters or symbol and does one of:
 
 | Option | Example |
 |---|---|
@@ -202,7 +205,7 @@ Options per rule: **Whole word only** (on by default, so "cat" doesn't change "c
 Rules apply to every read (including Surprise me). Now Reading still shows your original text, and word highlighting is timed to what is actually said. With Debug mode on, the terminal shows the text sent to the voice. Rules are applied in one pass, longest first, and are saved as `pronunciations` in settings.json; the logic lives in [pronunciation.py](pronunciation.py).
 
 ### Links, paths and codes
-The **Links, paths & codes** tab of the Pronunciations window chooses how long, hard-to-listen-to text is read. Each row shows an example, what it will sound like, and a **▶ Hear** button. The **Try it** box shows how any text you paste will be read (word rules included) and can play it.
+The **Links, paths & codes** tab of **Options…** chooses how long, hard-to-listen-to text is read. Each row shows an example, what it will sound like, and a **▶ Hear** button. The **Try it** box shows how any text you paste will be read (word rules included) and can play it.
 
 | Kind | Options (first is the default) |
 |---|---|
@@ -239,6 +242,11 @@ In testing with gTTS, sentence starts landed within about 0.1 s of the real audi
 ## Changelog
 
 The version number is also stored in `__version__` at the top of `reader.py`.
+
+### 1.8.0 — 2026-11-13
+- **Changed:** Engines & Voices, Pronunciations, Links, paths & codes, and Shortcuts are now tabs in one **Options** window, opened by a single **Options…** button next to Full View. The separate Engines & Voices…, Pronunciations… and Shortcuts… buttons are gone.
+- **Changed:** The Shortcuts tab saves without closing the window ("Shortcuts saved."), and Reset is now "Reset to defaults".
+- **Changed:** Right-clicking a word in Now Reading opens Options on the Pronunciations tab with that word filled in.
 
 ### 1.7.0 — 2026-11-13
 - **Added:** Links, paths & codes tab in the Pronunciations window. Long web links, email addresses, file paths and codes are read in a short form you choose (e.g. "github.com path 6", "path slash textReader slash reader dot py", "40 character code six five seven zero"), with an example and Hear button for each, and a Try it box. Saved as `text_filters`.
