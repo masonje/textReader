@@ -452,7 +452,7 @@ def create(window, engine_var, engine_dropdown, load_voices, on_engine_select, s
 
         def preview(name, voice_id, status_label, button):
             """Speak a short sample with this voice (and measure its speed)."""
-            if pygame.mixer.music.get_busy() or app.current_build is not None or app.audio_preparing:
+            if app.audio_out.busy() or app.current_build is not None or app.audio_preparing:
                 status_label.config(text="Stop the current reading first.")
                 return
             engine = get_engine(name)
@@ -964,7 +964,7 @@ def create(window, engine_var, engine_dropdown, load_voices, on_engine_select, s
                 return
             if state["playing"]:
                 return
-            if pygame.mixer.music.get_busy() or app.current_build is not None or app.audio_preparing:
+            if app.audio_out.busy() or app.current_build is not None or app.audio_preparing:
                 status_label.config(text="Stop the current reading first.", style="Muted.TLabel")
                 return
             state["playing"] = True

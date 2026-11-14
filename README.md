@@ -1,7 +1,7 @@
 # Clipboard Reader
-Reads text aloud. A Python take on TextAloud MP3 that runs on Linux, Windows, or macOS.
+Reads text aloud. A Python take on TextAloud MP3, made for Linux and tested on Ubuntu. It should also run on other Linux systems, macOS and Windows; see [Tested Platforms](#tested-platforms).
 
-**Version:** 1.10.0 — see [Changelog](#changelog) for what changed in each version.
+**Version:** 1.11.0 — see [Changelog](#changelog) for what changed in each version.
 
 ![Clipboard Reader in the Full view, highlighting the word being read](docs/screenshots/full-view.png)
 
@@ -34,92 +34,81 @@ So I made my own. Copilot helped me get it started, and Claude helped me turn it
 
 ![Options window, Links, paths & codes tab, with a Try it box](docs/screenshots/links-paths-codes.png)
 
+## Features
+- **Pronunciations:** change how words, names, abbreviations and symbols are read aloud (Options… → Pronunciations, or right-click a word in Now Reading). See [Pronunciations](#pronunciations).
+- **Links, paths & codes:** long web links, email addresses, file paths and codes (hashes, keys, account numbers) are read in a short form you choose, like "github.com path 6" or "40 character code six five seven zero". See [Links, paths and codes](#links-paths-and-codes).
+- **Surprise me:** tick "Surprise me with a random voice" (Full view, bottom left) and each read uses a random voice from the engines and voices you have turned on. Voices that would need a download first are skipped, and the same voice isn't picked twice in a row. The Now Reading header shows which voice was used. If the picked voice fails (for example, an online service doesn't answer), another engine is tried automatically.
+- Two views: **Compact** (just the controls, small enough to leave on screen) and **Full** (adds a panel showing the text being read, with the current word highlighted). Switch with the Full View ▸ / ◂ Compact button.
+- Reads clipboard text aloud
+- Adjustable playback speed (0.5x–2x), which can be changed while reading without restarting it
+- System tray icon
+- GUI controls
+- Configurable keyboard shortcuts (Options… → Shortcuts). Hover over Read Clipboard, Play, Pause or Stop to see its shortcut.
+- One **Options…** window with tabs for Engines & Voices, Pronunciations, Links, paths & codes, and Shortcuts
+
 ## Requirements
 
-- Linux (also runs on macOS and Windows, but is mainly used and tested on Linux)
-- Python 3.10+
-- Python packages, listed in [pyproject.toml](pyproject.toml): pyperclip, gTTS, pyttsx3, piper-tts, edge-tts, pygame, pystray, Pillow, pynput, numpy. `scripts/setup.sh` installs them.
-	- coqui-tts is optional (for Coqui TTS). It isn't installed by default because it needs PyTorch; the app can install it for you, see below.
+- Linux, macOS or Windows (see [Tested Platforms](#tested-platforms))
+- Python 3.10+, with the packages listed in [pyproject.toml](pyproject.toml). `scripts/setup.sh` installs them.
+	- coqui-tts is optional (for Coqui TTS). It isn't installed by default because it needs PyTorch; the app can install it for you, see [Speech Engines](#speech-engines).
+- libmpv: plays the audio and lets the speed change while reading. Without it the app falls back to pygame, and a speed change applies from the next read.
+- ffmpeg: word-highlight timing, and speed control when libmpv is missing.
+- espeak-ng (for the eSpeak-NG engine) and festival + text2wave (for the Festival engine), both optional.
 
-- ffmpeg (for audio speed control)
-- espeak-ng (for eSpeak-NG engine)
-- festival + text2wave (for Festival engine)
+`scripts/setup.sh` installs all of these on Ubuntu/Debian. On other systems (untested, see below):
 
-## ffmpeg Installation
+| | libmpv | ffmpeg |
+|---|---|---|
+| Fedora | `sudo dnf install mpv-libs` | `sudo dnf install ffmpeg` |
+| Arch | `sudo pacman -S mpv` | `sudo pacman -S ffmpeg` |
+| macOS (Homebrew) | `brew install mpv` | `brew install ffmpeg` |
+| Windows | `libmpv-2.dll` (for example from the mpv-player-windows "dev" builds), next to the app or on your PATH | from [ffmpeg.org](https://ffmpeg.org/download.html), with its `bin` folder on your PATH |
 
-### Linux
-- Ubuntu/Debian: `sudo apt-get install ffmpeg`
-- Fedora: `sudo dnf install ffmpeg`
-- Arch: `sudo pacman -S ffmpeg`
+### Tested Platforms
 
-### macOS
-- Homebrew: `brew install ffmpeg`
+| Platform | Status |
+|---|---|
+| Ubuntu 26.04 | ✅ Tested. Used every day, and every release is checked on it. |
+| Debian and other Ubuntu-based systems | Should work. `scripts/setup.sh` uses `apt`, the same as Ubuntu. |
+| Fedora, Arch | ⚠️ Not tested. The packages above should work, but `scripts/setup.sh` only supports `apt`, so install the system packages yourself, then create `.venv` and run `.venv/bin/pip install -e ".[dev]"`. |
+| macOS | ⚠️ Not tested. Should work with the Homebrew packages above. Global shortcuts need the terminal (or the app) to be allowed under Privacy & Security → Accessibility. |
+| Windows | ⚠️ Not tested with the current version (mpv playback). Should work with the steps above. There's no setup script for Windows yet. |
 
-### Windows
-- Download from [ffmpeg.org](https://ffmpeg.org/download.html)
-- Add the ffmpeg `bin` directory to your PATH environment variable
+If you try it on an untested platform, please open an issue saying whether it worked.
 
-## Setup and Usage
+## Installation
 
-On Ubuntu/Debian, `scripts/setup.sh` installs the system packages (ffmpeg, espeak-ng, festival, Tk, …), creates the `.venv` virtual environment, installs the app and its Python packages into it, and adds a desktop launcher:
+On Ubuntu/Debian:
 
 ```bash
 scripts/setup.sh
 ```
 
-Then run the app from source:
+This installs the system packages, creates the `.venv` virtual environment with the app and its Python packages, and adds a desktop launcher. Run the app with:
 
 ```bash
 .venv/bin/textreader
 ```
 
-(`.venv/bin/python -m textreader` does the same.) The app is installed in "editable" mode, so it runs the code in this folder: edit, restart, and your change is live.
+To install a standalone copy instead, run `scripts/install.sh`. It builds a single-file `reader` program, copies it to `~/.local/bin/reader`, and adds a "Screen Reader" launcher to the app menu. The target system still needs libmpv and ffmpeg.
 
-## Project Layout
+## Using It
 
-```
-textreader/             the app, as one Python package
-  __main__.py           entry point: --version, dependency check, --check-engines, start
-  app.py                main window, playback, hotkeys, tray icon, settings
-  options.py            the Options window and its tabs
-  theme.py              light/dark palette and widget styles
-  hotkeys.py            parsing and checking shortcut strings
-  pronunciation.py      word rules and the links/paths/codes filters
-  word_timing.py        word-highlight timing
-  engines/              one file per speech engine (see below)
-  assets/pireader.png   app icon
-scripts/                setup.sh, build.sh, install.sh
-tests/                  pytest tests
-docs/screenshots/       README pictures
-pyproject.toml          package info, dependencies, test settings
-```
+Select or copy some text and press the read shortcut (**Win+Esc** by default), or click **Read Clipboard**. Use **Play**, **Pause** and **Stop** to control it, and the **Speed** slider (0.5x–2x) to change speed, even while it's reading. **Engine** and **Voice** are locked while audio is being built or played; press Stop to change them.
 
-## Tests
+### Keyboard Shortcuts
+- **Win+Escape** — Read selected text
+- **Win+Shift+R** — Resume/Play
+- **Win+Shift+P** — Pause
+- **Win+Shift+S** — Stop
 
-```bash
-.venv/bin/python -m pytest
-```
+Change them in **Options… → Shortcuts**. Resting the mouse on the Read Clipboard, Play, Pause or Stop button shows its current shortcut.
 
-The tests cover the parts that can be checked without sound or a window: the pronunciation rules, the links/paths/codes filters, word-highlight timing and shortcut parsing. They run in under a second. Check the engines themselves with `reader --check-engines`.
+### Checking the Version
+- The Compact view shows the version at the bottom of the window.
+- From a terminal: `reader --version` (or `.venv/bin/textreader --version` from source).
 
-## TTS Engines (textreader/engines)
-
-Each TTS engine lives in the `textreader/engines` directory and implements a common interface.
-
-- textreader/engines/base.py
-	- Defines the `TTSEngine` base class
-	- Required fields: `name`, `output_ext`
-	- Required methods: `check_dependencies()`, `synthesize(text, output_path, cancel_event=None, voice=None)`
-	- Optional: `list_voices()` returns `(voice_id, label)` pairs, best default first
-	- `run_cancellable(cmd, cancel_event, input_text=None)`: helper that runs an external command and kills it if the build is cancelled
-	- `SynthesisCancelled`: exception an engine raises when it stops because of a cancel
-
-- textreader/engines/__init__.py
-	- Auto-discovers engine modules named `engine_*.py`
-	- Registers all `TTSEngine` subclasses
-	- Exposes `list_engines()` and `get_engine(name)`
-
-### Included engines
+## Speech Engines
 
 Pick the engine and voice in the control window. Each engine remembers its own voice choice.
 
@@ -147,67 +136,6 @@ These are saved in settings.json as `disabled_engines`, `disabled_voices`, `voic
 **Installing Coqui TTS:** pick Coqui TTS as the engine and the app offers to install it. It creates a private Python environment in `~/.textReader/engines/coqui` and installs CPU-only PyTorch and Coqui there (about 1 GB, several minutes). It shows the progress, and you can cancel. Coqui then runs in a background worker process that keeps the model loaded between reads. To remove it, delete `~/.textReader/engines`. If you run from source and have `coqui-tts` installed in the app's own environment, that is used instead.
 
 Run `reader --check-engines` (or `.venv/bin/textreader --check-engines` from source) to see which engines work and try each one.
-
-### Adding a new engine
-1. Create a new engine file in `textreader/engines` with the `engine_*.py` prefix (e.g., engine_mytts.py).
-2. Implement a subclass of `TTSEngine` with:
-	- `name`: what shows up in the UI dropdown
-	- `output_ext`: `mp3` or `wav`
-	- `check_dependencies()`: return a list of missing deps
-	- `list_voices()` (optional): return `(voice_id, label)` pairs; the UI shows the labels and passes the chosen `voice_id` back
-	- `synthesize(text, output_path, cancel_event=None, voice=None)`: write audio to output_path. Check `cancel_event.is_set()` where you can and raise `SynthesisCancelled`; for external commands use `run_cancellable()`. Engines that can't be interrupted can ignore it, and the app throws away their output.
-3. No manual registration required. The module is auto-discovered on startup.
-
-The main app (`textreader/app.py`) only calls `get_engine()` and `synthesize()` and does not contain per-engine logic.
-
-## Build and Install (Linux)
-
-`scripts/install.sh` builds a single-file executable with PyInstaller (via `scripts/build.sh`), copies it to `~/.local/bin/reader`, installs the icon set, and adds a "Screen Reader" launcher to the app menu.
-
-`scripts/build.sh` on its own builds `dist/reader` and copies it to `~/.local/bin/reader`. The PyInstaller options (bundled engines and icon, hidden imports) are in that script; its spec file goes in `build/`.
-
-4. Copy the executable to your target system. Make sure ffmpeg is installed (see above).
-
-## Features
-- **Pronunciations:** change how words, names, abbreviations and symbols are read aloud (Options… → Pronunciations, or right-click a word in Now Reading). See [Pronunciations](#pronunciations).
-- **Links, paths & codes:** long web links, email addresses, file paths and codes (hashes, keys, account numbers) are read in a short form you choose, like "github.com path 6" or "40 character code six five seven zero". See [Links, paths and codes](#links-paths-and-codes).
-- **Surprise me:** tick "Surprise me with a random voice" (Full view, bottom left) and each read uses a random voice from the engines and voices you have turned on. Voices that would need a download first are skipped, and the same voice isn't picked twice in a row. The Now Reading header shows which voice was used. If the picked voice fails (for example, an online service doesn't answer), another engine is tried automatically.
-- Two views: **Compact** (just the controls, small enough to leave on screen) and **Full** (adds a panel showing the text being read, with the current word highlighted). Switch with the Full View ▸ / ◂ Compact button.
-- Reads clipboard text aloud
-- Adjustable playback speed (0.5x–2x)
-- System tray icon
-- GUI controls
-- Configurable keyboard shortcuts (Options… → Shortcuts). Hover over Read Clipboard, Play, Pause or Stop to see its shortcut.
-- One **Options…** window with tabs for Engines & Voices, Pronunciations, Links, paths & codes, and Shortcuts
-
-## Preferences
-Settings are saved in `~/.textReader/settings.json`. The **Shortcuts** tab of the **Options…** window has drop-downs for the modifier and key of each action; click **Save** to use them. The same values can also be edited directly in JSON:
-
-```json
-{
-	"debug_mode": false,
-	"playback_speed": 1.0,
-	"tts_engine": "gTTS",
-	"theme": "auto",
-	"view_mode": "compact",
-	"full_window_size": "",
-	"surprise_voice": false,
-	"pronunciations": [
-		{"text": "SQL", "mode": "spell", "say": "", "whole_word": true, "match_case": false, "engine": "", "enabled": true},
-		{"text": "Nguyen", "mode": "say", "say": "win", "whole_word": true, "match_case": false, "engine": "", "enabled": true}
-	],
-	"text_filters": {"urls": "site_end", "emails": "full", "paths": "tail", "codes": "length"},
-	"hotkeys": {
-		"read_selected_text": "Win+Esc",
-		"play": "Win+Shift+R",
-		"pause": "Win+Shift+P",
-		"stop": "Win+Shift+S"
-	}
-}
-```
-
-`theme` can be `"auto"` (follow the desktop's light/dark setting), `"dark"`, or `"light"`.
-`view_mode` is `"compact"` or `"full"`, and `full_window_size` remembers the Full view's size (for example `"840x460"`). Both are saved automatically.
 
 ## Pronunciations
 Open the **Pronunciations** tab of **Options…**, or right-click a word (or a selection) in Now Reading and choose **Change how "word" is read…**. Each rule matches a word, name, letters or symbol and does one of:
@@ -247,27 +175,90 @@ None of the TTS engines report when each word is spoken, so [word_timing.py](tex
 
 In testing with gTTS, sentence starts landed within about 0.1 s of the real audio. Within a sentence, the highlight is an estimate and can run slightly ahead of or behind the voice.
 
-## Checking the Version
-- The Compact view shows the version at the bottom of the window.
-- From a terminal: `reader --version` (or `.venv/bin/textreader --version` from source).
+## Settings
+Settings are saved in `~/.textReader/settings.json`. The **Shortcuts** tab of the **Options…** window has drop-downs for the modifier and key of each action; click **Save** to use them. The same values can also be edited directly in JSON:
 
-## Keyboard Shortcuts
-- **Win+Escape** — Read selected text
-- **Win+Shift+R** — Resume/Play
-- **Win+Shift+P** — Pause
-- **Win+Shift+S** — Stop
+```json
+{
+	"debug_mode": false,
+	"playback_speed": 1.0,
+	"tts_engine": "gTTS",
+	"theme": "auto",
+	"view_mode": "compact",
+	"full_window_size": "",
+	"surprise_voice": false,
+	"pronunciations": [
+		{"text": "SQL", "mode": "spell", "say": "", "whole_word": true, "match_case": false, "engine": "", "enabled": true},
+		{"text": "Nguyen", "mode": "say", "say": "win", "whole_word": true, "match_case": false, "engine": "", "enabled": true}
+	],
+	"text_filters": {"urls": "site_end", "emails": "full", "paths": "tail", "codes": "length"},
+	"hotkeys": {
+		"read_selected_text": "Win+Esc",
+		"play": "Win+Shift+R",
+		"pause": "Win+Shift+P",
+		"stop": "Win+Shift+S"
+	}
+}
+```
 
-Change them in **Options… → Shortcuts**. Resting the mouse on the Read Clipboard, Play, Pause or Stop button shows its current shortcut.
+`theme` can be `"auto"` (follow the desktop's light/dark setting), `"dark"`, or `"light"`.
+`view_mode` is `"compact"` or `"full"`, and `full_window_size` remembers the Full view's size (for example `"840x460"`). Both are saved automatically.
+
+## Troubleshooting
+
+**Start it from a terminal** to see what it's doing: `reader` (or `.venv/bin/textreader` from source). It prints what it reads, what it plays, and any errors.
+
+**Command-line options:**
+
+| Option | What it does |
+|---|---|
+| `--version` | Print the version and exit. |
+| `--check-engines` | Speak a short phrase with every engine and report which work and why the others don't. The quickest check after installing or updating. |
+
+**Debug mode:** tick **Debug mode** at the bottom of the Full view (saved as `debug_mode`). The terminal then also shows each engine's dependency check, the exact text sent to the voice after filters and pronunciation rules, and word-timing details.
+
+**Messages to look for:**
+
+| Message | Meaning |
+|---|---|
+| `🔊 Playback: mpv` | Normal. Speed can change while reading. |
+| `🔊 Playback: pygame (speed changes apply to the next read)` | libmpv wasn't found. Install it (see [Requirements](#requirements)). |
+| `⚠️ mpv: …` | mpv reported a playback error. |
+| `⚠️ No text to read` | The read shortcut found nothing selected and an empty clipboard (a short beep plays). |
+
+**Playback problems:** start it with an mpv log, reproduce the problem, and include the log in your report:
+
+```bash
+TR_MPV_LOG=/tmp/mpv.log reader
+```
+
+**Reset settings:** quit the app and rename `~/.textReader/settings.json`. It starts with the defaults and makes a new one. Downloaded Piper voices (`~/.textReader/voices`) and the Coqui install (`~/.textReader/engines`) are kept.
+
+**An engine is missing from the list:** it may be turned off in **Options… → Engines & Voices**, or missing something it needs. `--check-engines` says which.
+
+## Contributing
+
+How the code is laid out, running the tests, adding a speech engine, building, and debugging tools are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Changelog
 
 The version number is stored in `__version__` in [textreader/__init__.py](textreader/__init__.py).
 
+### 1.11.0 — 2026-11-14
+- **Changed:** Playback now uses mpv. The audio plays as soon as it's built, at any speed: before, every read at a speed other than 1.0x was first run through ffmpeg (and MP3 compressed again), with nothing playing until that finished.
+- **Added:** The speed can be changed while reading. The slider stays on during playback, and the voice keeps its pitch. The time shown follows the speed.
+- **Changed:** Engine and Voice are greyed out while audio is being built, played or paused, and come back after Stop or when the read ends.
+- **Changed:** Without libmpv the app falls back to pygame as before (speed changes apply from the next read), and the sped-up copy is now WAV, so MP3 isn't compressed twice.
+- **Fixed:** The app could freeze when reading if the program that owns the clipboard didn't answer. It now gives up after 2 seconds and says so in the terminal.
+- **Added:** `TR_MPV_LOG=/path/file.log` writes mpv's full log for troubleshooting playback.
+- **Docs:** The README is now for people using the app, with new Troubleshooting and Tested Platforms sections. Project layout, tests, adding an engine, building and debugging moved to [CONTRIBUTING.md](CONTRIBUTING.md).
+- **Install:** New requirements: `python-mpv` (in `pyproject.toml`) and libmpv (`libmpv2`, added to `scripts/setup.sh`).
+
 ### 1.10.0 — 2026-11-14
 - **Added:** Hover hints on the Read Clipboard, Play, Pause and Stop buttons show what each does and its keyboard shortcut. They follow changes made in Options → Shortcuts. The Options… button has a hint too.
 
 ### 1.9.0 — 2026-11-14
-- **Changed:** The code is now one Python package, `textreader/`. The 3,000-line `reader.py` is split into `app.py`, `options.py` (the Options window), `theme.py` and `hotkeys.py`, and `tts_engines/` is now `textreader/engines/`. See [Project Layout](#project-layout).
+- **Changed:** The code is now one Python package, `textreader/`. The 3,000-line `reader.py` is split into `app.py`, `options.py` (the Options window), `theme.py` and `hotkeys.py`, and `tts_engines/` is now `textreader/engines/`. See [Project Layout](CONTRIBUTING.md#project-layout).
 - **Changed:** `setup.sh`, `build.sh` and `install.sh` moved to `scripts/`. Dependencies moved from `requirements.txt` to `pyproject.toml`, and `scripts/setup.sh` installs the app into `.venv`.
 - **Changed:** Run from source with `.venv/bin/textreader` (or `python -m textreader`). `run.sh` is gone.
 - **Added:** `tests/` with pytest tests for the pronunciation rules, the links/paths/codes filters, word timing and shortcuts. Run them with `.venv/bin/python -m pytest`.
