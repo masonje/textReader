@@ -1,5 +1,5 @@
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 
 # Dependency check
 import sys
@@ -197,6 +197,7 @@ def default_settings():
         "voice_ratings": {},
         "surprise_voice": False,
         "pronunciations": [],
+        "text_filters": pronunciation.clean_filters(None),
     }
 
 def normalize_loaded_hotkeys(raw_hotkeys):
@@ -228,7 +229,8 @@ def save_settings():
                        "disabled_voices": {k: sorted(v) for k, v in disabled_voices.items() if v},
                        "voice_stats": voice_stats, "voice_ratings": voice_ratings,
                        "surprise_voice": surprise_voice,
-                       "pronunciations": pronunciations}, f, indent=2)
+                       "pronunciations": pronunciations,
+                       "text_filters": text_filters}, f, indent=2)
     except Exception:
         pass
 
@@ -261,6 +263,8 @@ voice_ratings = settings.get("voice_ratings", {}) or {}
 surprise_voice = bool(settings.get("surprise_voice", False))  # pick a random voice for each read
 # Pronunciation rules: how to say particular words, names and symbols (see pronunciation.py)
 pronunciations = pronunciation.clean_rules(settings.get("pronunciations", []))
+# How to read web links, emails, file paths and long codes ("urls" -> "site", ...)
+text_filters = pronunciation.clean_filters(settings.get("text_filters"))
 
 # Voice lists by engine, filled in the background so a surprise pick never waits on a slow engine
 voice_cache = {}
@@ -801,10 +805,10 @@ def start_build(text):
                 if voices_changed_callback is not None:
                     voices_changed_callback(engine_name)
             ready = engine.voice_ready(voice)  # False: this build includes a download or model load
-            spoken, edits = pronunciation.apply(text, pronunciations, engine_name)
+            spoken, edits = pronunciation.apply(text, pronunciations, engine_name, text_filters)
             job["edits"] = edits
             if not spoken.strip():
-                return "Nothing left to read: your pronunciation rules skip all of this text"
+                return "Nothing left to read: your pronunciation settings skip all of this text"
             if edits and debug_mode:
                 print(f"🐛 [DEBUG] Pronunciation: {len(edits)} change(s) → {spoken[:200]!r}")
             started = time.monotonic()
@@ -1155,6 +1159,16 @@ def apply_theme(root):
     style.map("Vertical.TScrollbar", background=[("active", p["hover"])],
               lightcolor=[("active", p["hover"])], darkcolor=[("active", p["hover"])])
     style.configure("TSeparator", background=p["border"])
+    style.configure("TNotebook", background=p["bg"], bordercolor=p["border"], lightcolor=p["bg"],
+                    darkcolor=p["bg"], tabmargins=(0, 0, 0, 0))
+    style.configure("TNotebook.Tab", background=p["button"], foreground=p["fg"], bordercolor=p["border"],
+                    lightcolor=p["button"], darkcolor=p["button"], focuscolor=p["button"], padding=(14, 5))
+    style.map("TNotebook.Tab",
+              background=[("selected", p["bg"]), ("active", p["hover"])],
+              lightcolor=[("selected", p["bg"]), ("active", p["hover"])],
+              darkcolor=[("selected", p["bg"]), ("active", p["hover"])],
+              focuscolor=[("selected", p["bg"]), ("active", p["hover"])],
+              bordercolor=[("selected", p["border"])])
     _theme_fonts["reading"] = reading = default_font.copy()
     reading.configure(size=13)
     style.configure("Horizontal.TProgressbar", background=p["accent"], troughcolor=p["field"],
@@ -2175,12 +2189,18 @@ def create_control_window():
         dialog.transient(window)
         dialog.resizable(True, True)
         dialog.minsize(860, 0)
-        ttk.Label(body, text="Change how words, names, abbreviations and symbols are read aloud. "
-                             "Click a rule's box to turn it on or off. Tip: right-click a word in "
-                             "Now Reading to add it here.", wraplength=780).pack(anchor="w")
+        notebook = ttk.Notebook(body)
+        notebook.pack(fill=tk.BOTH, expand=True)
+        words_tab = ttk.Frame(notebook, padding=(12, 12, 12, 10))
+        filters_tab = ttk.Frame(notebook, padding=(12, 12, 12, 10))
+        notebook.add(words_tab, text="Words & names")
+        notebook.add(filters_tab, text="Links, paths & codes")
+        ttk.Label(words_tab, text="Change how words, names, abbreviations and symbols are read aloud. "
+                                  "Click a rule's box to turn it on or off. Tip: right-click a word in "
+                                  "Now Reading to add it here.", wraplength=780).pack(anchor="w")
 
-        panes = ttk.Frame(body)
-        panes.pack(fill=tk.BOTH, expand=True, pady=(10, 8))
+        panes = ttk.Frame(words_tab)
+        panes.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
         tree_frame = ttk.Frame(panes)
         tree_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         tree = ttk.Treeview(tree_frame, columns=("say", "engine"), show="tree headings",
@@ -2200,7 +2220,7 @@ def create_control_window():
         ttk.Separator(panes, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=12)
         form = ttk.Frame(panes)
         form.pack(side=tk.LEFT, fill=tk.Y)
-        ttk.Frame(form, width=330, height=0).pack()  # keeps the form at a steady width
+        ttk.Frame(form, width=350, height=0).pack()  # keeps the form at a steady width
 
         form_title = ttk.Label(form, text="New rule", style="Header.TLabel")
         form_title.pack(anchor="w", pady=(0, 8))
@@ -2252,14 +2272,75 @@ def create_control_window():
 
         form_buttons = ttk.Frame(form)
         form_buttons.pack(side=tk.BOTTOM, fill=tk.X, pady=(12, 0))
+        ttk.Button(form_buttons, text="New", command=lambda: new_rule()).pack(side=tk.LEFT)
         delete_btn = ttk.Button(form_buttons, text="Delete", command=lambda: delete_rule())
-        delete_btn.pack(side=tk.LEFT)
+        delete_btn.pack(side=tk.LEFT, padx=(6, 0))
         save_btn = ttk.Button(form_buttons, text="Add rule", style="Accent.TButton", command=lambda: save_rule())
-        save_btn.pack(side=tk.RIGHT)
+        save_btn.pack(side=tk.RIGHT, padx=(6, 0))
+
+        # ---- Links, paths & codes tab
+        ttk.Label(filters_tab, text="Long web links, email addresses, file paths and codes are hard to listen to "
+                                    "in full. Choose how each kind is read. These apply to every voice.",
+                  wraplength=780).pack(anchor="w")
+        filter_grid = ttk.Frame(filters_tab)
+        filter_grid.pack(fill=tk.X, pady=(14, 0))
+        filter_grid.columnconfigure(2, weight=1)
+        filter_vars = {}
+
+        def on_filter_change(kind, var, example_label):
+            choices = pronunciation.FILTERS[kind]["choices"]
+            choice = next(k for k, v in choices.items() if v == var.get())
+            text_filters[kind] = choice
+            save_settings()
+            example_label.config(text=f"→ {pronunciation.filter_example(kind, choice)}")
+            update_try()
+
+        for row, (kind, spec) in enumerate(pronunciation.FILTERS.items()):
+            ttk.Label(filter_grid, text=spec["label"], style="Header.TLabel").grid(
+                row=row * 2, column=0, sticky="w", padx=(0, 14), pady=(8, 0))
+            var = tk.StringVar(value=spec["choices"][text_filters[kind]])
+            combo = ttk.Combobox(filter_grid, textvariable=var, state="readonly", width=52,
+                                 values=list(spec["choices"].values()))
+            combo.configure(postcommand=lambda c=combo: widen_popdown(c))
+            combo.grid(row=row * 2, column=1, sticky="w", pady=(8, 0))
+            hear_example = ttk.Button(filter_grid, text="▶ Hear",
+                                      command=lambda k=kind: hear_text(pronunciation.filter_example(k, text_filters[k]),
+                                                                       try_status))
+            hear_example.grid(row=row * 2, column=2, sticky="w", padx=(10, 0), pady=(8, 0))
+            ttk.Label(filter_grid, text=f"e.g. {spec['example']}", style="Muted.TLabel").grid(
+                row=row * 2 + 1, column=0, sticky="w", padx=(0, 14))
+            example_label = ttk.Label(filter_grid, text=f"→ {pronunciation.filter_example(kind, text_filters[kind])}",
+                                      style="Muted.TLabel")
+            example_label.grid(row=row * 2 + 1, column=1, columnspan=2, sticky="w")
+            combo.bind("<<ComboboxSelected>>", lambda _e, k=kind, v=var, l=example_label: on_filter_change(k, v, l))
+            filter_vars[kind] = var
+
+        ttk.Separator(filters_tab).pack(fill=tk.X, pady=(18, 12))
+        ttk.Label(filters_tab, text="Try it: paste or type some text to see how it will be read "
+                                    "(with your word rules too).").pack(anchor="w")
+        try_var = tk.StringVar(value="Docs are at https://github.com/masonje/textReader and the "
+                                     "script is in ~/github/textReader/reader.py.")
+        try_entry = ttk.Entry(filters_tab, textvariable=try_var)
+        try_entry.pack(fill=tk.X, pady=(4, 6))
+        try_result = ttk.Label(filters_tab, text="", wraplength=780)
+        try_result.pack(anchor="w")
+        try_row = ttk.Frame(filters_tab)
+        try_row.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(try_row, text="▶ Hear it", command=lambda: hear_text(try_spoken(), try_status)).pack(side=tk.LEFT)
+        try_status = ttk.Label(try_row, text="", style="Muted.TLabel")
+        try_status.pack(side=tk.LEFT, padx=(10, 0))
+
+        def try_spoken():
+            spoken, _ = pronunciation.apply(try_var.get(), pronunciations, tts_engine, text_filters)
+            return spoken
+
+        def update_try(*_):
+            spoken = try_spoken().strip()
+            try_result.config(text=f"Read as: {spoken}" if spoken else "Read as: (nothing)")
+        try_var.trace_add("write", update_try)
 
         buttons = ttk.Frame(body)
         buttons.pack(fill=tk.X, pady=(10, 0))
-        ttk.Button(buttons, text="New rule", command=lambda: new_rule()).pack(side=tk.LEFT)
         ttk.Button(buttons, text="Close", style="Accent.TButton", width=8,
                    command=lambda: close()).pack(side=tk.RIGHT)
 
@@ -2343,6 +2424,7 @@ def create_control_window():
             dialog.focus_force()
             if not word:
                 return
+            notebook.select(words_tab)
             index = find_rule(word)
             if index is None:
                 new_rule(word)
@@ -2380,6 +2462,7 @@ def create_control_window():
             save_settings()
             redraw(index)
             load(index)
+            update_try()
             status.config(text="Saved. It's used from the next read.", style="Muted.TLabel")
 
         def delete_rule():
@@ -2420,9 +2503,6 @@ def create_control_window():
             word = text_var.get().strip()
             if not word:
                 return
-            if pygame.mixer.music.get_busy() or current_build is not None or audio_preparing:
-                status.config(text="Stop the current reading first.", style="Muted.TLabel")
-                return
             rule = form_rule()
             name = rule["engine"] or tts_engine
             if get_engine(name) is None:
@@ -2435,10 +2515,22 @@ def create_control_window():
                 if not sample.strip():
                     status.config(text="With this rule it isn't read at all.", style="Muted.TLabel")
                     return
-            voice_id = engine_voices.get(name)
+            hear_text(sample, status, name)
+
+        def hear_text(sample, status_label, name=None):
+            """Speak `sample` with the current voice (or `name`'s), showing progress in `status_label`."""
+            name = name or tts_engine
+            if not sample.strip():
+                status_label.config(text="Nothing to read.", style="Muted.TLabel")
+                return
+            if state["playing"]:
+                return
+            if pygame.mixer.music.get_busy() or current_build is not None or audio_preparing:
+                status_label.config(text="Stop the current reading first.", style="Muted.TLabel")
+                return
             state["playing"] = True
             update_form()
-            status.config(text=f"Building with {name}…", style="Muted.TLabel")
+            status_label.config(text=f"Building with {name}…", style="Muted.TLabel")
 
             def report(message):
                 if not dialog.winfo_exists():
@@ -2446,8 +2538,10 @@ def create_control_window():
                 if not message or message.startswith("Couldn't") or "isn't ready" in message:
                     state["playing"] = False
                     update_form()
-                status.config(text=message, style="Error.TLabel" if message.startswith("Couldn't") else "Muted.TLabel")
-            threading.Thread(target=play_sample, args=(name, voice_id, sample, report), daemon=True).start()
+                status_label.config(text=message,
+                                    style="Error.TLabel" if message.startswith("Couldn't") else "Muted.TLabel")
+            threading.Thread(target=play_sample, args=(name, engine_voices.get(name), sample, report),
+                             daemon=True).start()
 
         def close():
             pron_editor["open"] = None
@@ -2459,6 +2553,7 @@ def create_control_window():
         say_entry.bind("<Return>", lambda _e: save_rule())
         pron_editor["open"] = open_word
         redraw()
+        update_try()
         if word:
             open_word(word)
         else:

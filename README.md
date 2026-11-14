@@ -1,7 +1,7 @@
 # Clipboard Reader
 Reads text aloud. A Python take on TextAloud MP3 that runs on Linux, Windows, or macOS.
 
-**Version:** 1.6.0 — see [Changelog](#changelog) for what changed in each version.
+**Version:** 1.7.0 — see [Changelog](#changelog) for what changed in each version.
 
 ![Clipboard Reader in the Full view, highlighting the word being read](docs/screenshots/full-view.png)
 
@@ -23,6 +23,10 @@ So I made my own. Copilot helped me get it started, and Claude helped me turn it
 **Pronunciations**: change how words, names, abbreviations and symbols are read.
 
 ![Pronunciations editor with a rule that reads Nguyen as "win"](docs/screenshots/pronunciations.png)
+
+**Links, paths & codes**: read long web links, email addresses, file paths and codes in a short form instead of spelling them out.
+
+![Links, paths & codes tab with a Try it box](docs/screenshots/links-paths-codes.png)
 
 ## Requirements
 
@@ -146,6 +150,7 @@ The main app (reader.py) only calls `get_engine()` and `synthesize()` and does n
 
 ## Features
 - **Pronunciations:** change how words, names, abbreviations and symbols are read aloud (Full view → Pronunciations…, or right-click a word in Now Reading). See [Pronunciations](#pronunciations).
+- **Links, paths & codes:** long web links, email addresses, file paths and codes (hashes, keys, account numbers) are read in a short form you choose, like "github.com path 6" or "40 character code six five seven zero". See [Links, paths and codes](#links-paths-and-codes).
 - **Surprise me:** tick "Surprise me with a random voice" (Full view, bottom left) and each read uses a random voice from the engines and voices you have turned on. Voices that would need a download first are skipped, and the same voice isn't picked twice in a row. The Now Reading header shows which voice was used. If the picked voice fails (for example, an online service doesn't answer), another engine is tried automatically.
 - Two views: **Compact** (just the controls, small enough to leave on screen) and **Full** (adds a panel showing the text being read, with the current word highlighted). Switch with the Full View ▸ / ◂ Compact button.
 - Reads clipboard text aloud
@@ -170,6 +175,7 @@ Settings are saved in `~/.textReader/settings.json`. The control window includes
 		{"text": "SQL", "mode": "spell", "say": "", "whole_word": true, "match_case": false, "engine": "", "enabled": true},
 		{"text": "Nguyen", "mode": "say", "say": "win", "whole_word": true, "match_case": false, "engine": "", "enabled": true}
 	],
+	"text_filters": {"urls": "site_end", "emails": "full", "paths": "tail", "codes": "length"},
 	"hotkeys": {
 		"read_selected_text": "Win+Esc",
 		"play": "Win+Shift+R",
@@ -195,6 +201,23 @@ Options per rule: **Whole word only** (on by default, so "cat" doesn't change "c
 
 Rules apply to every read (including Surprise me). Now Reading still shows your original text, and word highlighting is timed to what is actually said. With Debug mode on, the terminal shows the text sent to the voice. Rules are applied in one pass, longest first, and are saved as `pronunciations` in settings.json; the logic lives in [pronunciation.py](pronunciation.py).
 
+### Links, paths and codes
+The **Links, paths & codes** tab of the Pronunciations window chooses how long, hard-to-listen-to text is read. Each row shows an example, what it will sound like, and a **▶ Hear** button. The **Try it** box shows how any text you paste will be read (word rules included) and can play it.
+
+| Kind | Options (first is the default) |
+|---|---|
+| **Web links** | Site and last part: "github.com path 6" · Site and "weblink": "github.com weblink" · Just say "link" · Read it in full |
+| **Email addresses** | Read it in full · Just the name before the @: "jane doe" · Email to the name: "email to jane doe" · Just say "email address" |
+| **File paths** | Folder and file: "path slash textReader slash reader dot py" · File path: "file path slash textReader slash reader.py" · Say the file name: "path to reader.py" · Just say "file path" · In full, saying slashes: "file path home slash jane slash … slash reader.py" · In full, no slashes: "file path home jane … reader.py" |
+| **Long codes** | Length and last 4: "40 character code six five seven zero" (or "16 digit code …" for numbers) · Say the first 4: "code six bee bee six" · Just say "code" · Read it in full |
+
+What counts:
+- **Web links** start with `http://`, `https://`, `ftp://` or `www.`. Punctuation that ends a sentence isn't part of the link, and the query (`?…`) is ignored.
+- **File paths** start with `/` and have at least two parts, or start with `~/`, `./`, `../` or a drive letter like `C:\`. So "and/or" and "1/2" are left alone.
+- **Long codes** are 12 or more letters and digits run together with at least 2 digits, optionally joined by `-` or `_`: git hashes, UUIDs, tracking numbers, licence keys, card and account numbers. Dates and phone numbers aren't long enough to count.
+
+Links, paths and codes are handled before word rules. The choices are saved as `text_filters` in settings.json.
+
 ## Word Highlighting (Full view)
 None of the TTS engines report when each word is spoken, so [word_timing.py](word_timing.py) estimates it:
 1. Each word is weighted by length, with extra time after punctuation where voices pause.
@@ -216,6 +239,11 @@ In testing with gTTS, sentence starts landed within about 0.1 s of the real audi
 ## Changelog
 
 The version number is also stored in `__version__` at the top of `reader.py`.
+
+### 1.7.0 — 2026-11-13
+- **Added:** Links, paths & codes tab in the Pronunciations window. Long web links, email addresses, file paths and codes are read in a short form you choose (e.g. "github.com path 6", "path slash textReader slash reader dot py", "40 character code six five seven zero"), with an example and Hear button for each, and a Try it box. Saved as `text_filters`.
+- **Changed:** The Pronunciations window has two tabs: Words & names, and Links, paths & codes. "New rule" moved next to Delete and Save.
+- **Changed:** Skipped words no longer leave stray spaces before punctuation.
 
 ### 1.6.0 — 2026-11-13
 - **Added:** Pronunciation editor (Full view → Pronunciations…). Rules can say a word differently, spell it out letter by letter, or skip it, with whole-word, match-case and per-engine options, an on/off box per rule, and "Hear it" buttons to compare before and after. Saved as `pronunciations`.
