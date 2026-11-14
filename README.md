@@ -1,7 +1,7 @@
 # Clipboard Reader
 Reads text aloud. A Python take on TextAloud MP3 that runs on Linux, Windows, or macOS.
 
-**Version:** 1.8.0 — see [Changelog](#changelog) for what changed in each version.
+**Version:** 1.8.1 — see [Changelog](#changelog) for what changed in each version.
 
 ![Clipboard Reader in the Full view, highlighting the word being read](docs/screenshots/full-view.png)
 
@@ -242,6 +242,9 @@ In testing with gTTS, sentence starts landed within about 0.1 s of the real audi
 ## Changelog
 
 The version number is also stored in `__version__` at the top of `reader.py`.
+
+### 1.8.1 — 2026-11-14
+- **Changed:** Version bump after the 1.8.0 Options window release was merged; no feature changes.
 
 ### 1.8.0 — 2026-11-13
 - **Changed:** Engines & Voices, Pronunciations, Links, paths & codes, and Shortcuts are now tabs in one **Options** window, opened by a single **Options…** button next to Full View. The separate Engines & Voices…, Pronunciations… and Shortcuts… buttons are gone.
