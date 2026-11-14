@@ -1,7 +1,28 @@
 # Clipboard Reader
-Reads text aloud. Python version of text aloud mp3 to run on Linux, Windows, or macOS.
+Reads text aloud. A Python take on TextAloud MP3 that runs on Linux, Windows, or macOS.
 
 **Version:** 1.6.0 — see [Changelog](#changelog) for what changed in each version.
+
+![Clipboard Reader in the Full view, highlighting the word being read](docs/screenshots/full-view.png)
+
+## Why I Built This
+I love Linux, but I've struggled with dyslexia my whole life. Having text read aloud is how I get through long emails, documentation and web pages. On Windows I used TextAloud MP3, and on the Mac I used the built-in speech features, but on Linux I couldn't find anything that did what I needed.
+
+So I made my own. Copilot helped me get it started, and Claude helped me turn it into the tool I actually need. Clipboard Reader is what lets me live in Linux on both my work and home machines.
+
+## Screenshots
+
+**Compact view**: just the controls, small enough to leave on screen. (The **Full view**, shown at the top, adds the text being read with the current word highlighted, plus options.)
+
+![Compact view: engine, voice, speed and playback controls](docs/screenshots/compact.png)
+
+**Engines & Voices**: turn engines and voices on or off, preview them, download or delete voices, and see where audio is generated, speed and quality.
+
+![Engines & Voices window with a Piper voice selected](docs/screenshots/engines-voices.png)
+
+**Pronunciations**: change how words, names, abbreviations and symbols are read.
+
+![Pronunciations editor with a rule that reads Nguyen as "win"](docs/screenshots/pronunciations.png)
 
 ## Requirements
 
